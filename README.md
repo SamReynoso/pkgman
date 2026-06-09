@@ -1,4 +1,4 @@
-# 📦 pkgtui
+# 📦 pkgman
 
 > A High-Performance, Keyboard-Driven Package Manager Terminal User Interface (TUI) for Arch Linux.
 
