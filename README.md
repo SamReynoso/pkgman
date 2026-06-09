@@ -164,8 +164,3 @@ Press `?` inside `pkgtui` at any time to pull up the interactive keyboard shortc
 | **`?`** | Toggle Help Overlay |
 | **`q`** | Quit application |
 
----
-
-## 🛡️ License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
