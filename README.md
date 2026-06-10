@@ -280,12 +280,6 @@ Look for issues tagged [`good first issue`](https://github.com/pathakjiop/pkgman
 
 ---
 
-## License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
 <div align="center">
 
 Made with ♥ on Arch Linux  
