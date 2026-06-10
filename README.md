@@ -26,50 +26,6 @@ Built with Rust · Powered by Ratatui · AUR-aware
 
 ---
 
-## The problem with `pacman`
-
-`pacman` and AUR helpers like `yay`/`paru` are powerful — but managing packages through them is fragmented, repetitive, and blind to context. You run one command to search, another to inspect, another to install. You lose your place. You repeat yourself.
-
-`pkgman` collapses all of that into a single, persistent TUI: live search, full metadata at a glance, batch operations, and real-time install logs — all without leaving the terminal.
-
----
-
-## Features
-
-### ⚡ Performance-first architecture
-
-- **< 50ms startup** — installed packages load synchronously; repos and AUR stream in the background
-- **< 10ms AUR listing** — reads `yay`/`paru` shell completion caches directly, no subprocess overhead
-- **~360,000 lines of pacman DB** parsed in milliseconds
-- Zero-bloat binary via Rust + Ratatui — negligible memory footprint
-
-### 🖥️ Interface
-
-- **Split-pane layout** — package list · full metadata · maintainer/context info, all visible at once
-- **Live header indicators** — `Installed: ✔  Repos: ⠋  AUR: ◌` tracks background load progress in real-time
-- **7 filter tabs** — `All`, `Installed`, `Updates`, `Core`, `Extra`, `Multilib`, `AUR` (keys `1`–`7`)
-- **Dynamic sort** — cycle by Name, Repository, Download Size, or Install status
-
-### 📦 Package operations
-
-- **Batch install/remove** — mark multiple packages with `Space`, act on all at once
-- **In-TUI sudo prompts & install logs** — full console overlay with auto DB refresh on completion
-- **System upgrade** — `pacman -Syu` directly from the TUI
-- **Async DB reload** — refresh databases without quitting
-
-### 🔍 Search & discovery
-
-- **Incremental live search** — results filter as you type, no enter required
-- **Lazy AUR detail fetching** — descriptions, deps, and licenses load in the background with 300ms debounce
-- **Repository priority sorting** — `core > extra > multilib > others > aur > local`; AUR never floods the main view
-
-### 🛡️ Safety
-
-- **Script inspection** — securely fetch and preview `curl | bash` scripts before executing
-- **Homepage cURL** — async-fetch the official homepage of any selected package
-
----
-
 ## Installation
 
 ### Prerequisites
