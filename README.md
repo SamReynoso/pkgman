@@ -36,7 +36,6 @@ Built with Rust · Powered by Ratatui · AUR-aware
 | Rust toolchain (`cargo`, `rustc`) | Install via [rustup.rs](https://rustup.rs) |
 | `pacman` | Ships with Arch — you already have it |
 | `yay` or `paru` *(optional)* | Required for AUR operations |
-| `curl` *(optional)* | Required for homepage fetch and script preview |
 
 ### Build from source
 

@@ -26,8 +26,7 @@ const HELP_LINES: &[(&str, &str)] = &[
     ("i", "Install selected"),
     ("u", "Update selected"),
     ("r", "Remove selected"),
-    ("d", "Curl / Download website"),
-    ("E (shift)", "Run custom curl script"),
+    ("d", "Open website (xdg-open)"),
     ("R (shift)", "Reload packages"),
     ("s", "Cycle sort mode"),
     ("t", "Theme Selector / Builder"),
@@ -87,11 +86,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     if let Some((action, names)) = &app.confirm {
         render_confirm_overlay(f, size, action, names);
-    }
-    if app.url_input_mode {
-        render_url_input_overlay(f, size, &app.url_query);
-    } else if let Some((url, content)) = &app.script_preview {
-        render_script_preview_overlay(f, size, url, content);
     }
     if app.sudo_password_mode {
         render_sudo_password_overlay(f, size, &app.sudo_password);
@@ -635,7 +629,7 @@ fn render_action_buttons(f: &mut Frame, pkg: &crate::app::Package, area: Rect, t
     draw_btn(f, cols[0], " Install ", "[i]", theme.accent, can_install);
     draw_btn(f, cols[1], " Update ↑ ", "[u]", theme.warning, can_update);
     draw_btn(f, cols[2], " Uninstall ", "[r]", theme.error, can_remove);
-    draw_btn(f, cols[3], " Curl WWW ", "[d]", theme.accent, true);
+    draw_btn(f, cols[3], " Open WWW ", "[d]", theme.accent, true);
 }
 
 // ── context panel ───────────────────────────────────────────────────
@@ -702,7 +696,7 @@ fn render_context_panel(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(app.theme.accent),
         )));
         lines.push(Line::from(Span::styled(
-            " → Available via [d] Curl",
+            " → Open via [d]",
             Style::default().fg(app.theme.success),
         )));
     } else {
@@ -756,7 +750,7 @@ fn render_context_panel(f: &mut Frame, app: &App, area: Rect) {
 fn render_footer(f: &mut Frame, app: &mut App, area: Rect) {
     app.check_msg_expiry();
 
-    let keys = " [/] Search │ [Space] Select │ [1-7] Tabs │ [E] Script │ [t] Theme │ [?] Help │ [q] Quit ";
+    let keys = " [/] Search │ [Space] Select │ [1-7] Tabs │ [t] Theme │ [?] Help │ [q] Quit ";
     f.render_widget(
         Paragraph::new(keys).style(
             Style::default()
@@ -927,104 +921,6 @@ fn render_confirm_overlay(f: &mut Frame, area: Rect, action: &ConfirmAction, nam
     );
 }
 
-fn render_url_input_overlay(f: &mut Frame, area: Rect, query: &str) {
-    let popup = centered_rect(60, 25, area);
-    f.render_widget(Clear, popup);
-
-    let lines = vec![
-        Line::from(Span::styled(
-            " RUN CUSTOM SCRIPT (curl | bash) ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  URL: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(query, Style::default().fg(Color::White)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [Enter] Fetch    [Esc] Cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .style(Style::default().bg(Color::Black))
-            .alignment(Alignment::Center),
-        popup,
-    );
-}
-
-fn render_script_preview_overlay(f: &mut Frame, area: Rect, url: &str, content: &str) {
-    let popup = centered_rect(80, 80, area);
-    f.render_widget(Clear, popup);
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        " ⚠  SCRIPT PREVIEW ",
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(vec![
-        Span::styled("  Source: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(url, Style::default().fg(Color::Cyan)),
-    ]));
-    lines.push(Line::from(Span::styled(
-        "  ──────────────────────────────────────",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    let all_lines: Vec<&str> = content.lines().collect();
-    let limit = 24;
-    for &l in all_lines.iter().take(limit) {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", l),
-            Style::default().fg(Color::White),
-        )));
-    }
-    if all_lines.len() > limit {
-        lines.push(Line::from(Span::styled(
-            format!("  … ({} more lines)", all_lines.len() - limit),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "  [y/Enter] Execute    ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("[n/Esc] Cancel", Style::default().fg(Color::DarkGray)),
-    ]));
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow)),
-            )
-            .style(Style::default().bg(Color::Black))
-            .wrap(Wrap { trim: true }),
-        popup,
-    );
-}
-
 // ── utilities ───────────────────────────────────────────────────────
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -1137,7 +1033,7 @@ fn render_theme_builder_overlay(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            " 🎨  THEME BUILDER & SELECTOR ",
+            " THEME BUILDER & SELECTOR ",
             Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
         ))
         .border_style(Style::default().fg(border_color))
