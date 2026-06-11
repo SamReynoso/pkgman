@@ -120,8 +120,8 @@ paru -Sl aur > /dev/null
 |-----|--------|
 | `↑` / `k` | Move cursor up |
 | `↓` / `j` | Move cursor down |
-| `PgUp` / `PgDn` | Scroll full page |
-| `J` / `K` | Scroll details pane |
+| `PgUp` / `PgDn` `(CTRL)` | Scroll full page |
+| `J` / `K` + `(CTRL)` | Scroll details pane |
 | `1` – `7` | Switch filter tabs |
 | `/` | Enter live search mode |
 | `Ctrl+X` | Clear search query |
