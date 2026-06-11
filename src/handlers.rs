@@ -1,10 +1,7 @@
 use crate::app::{App, ConfirmAction, FILTERS};
 use crate::event::AppEvent;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::io::{self, Write};
 use std::process::Command;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::ExecutableCommand;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -199,32 +196,6 @@ pub fn trigger_aur_details_fetch(name: String, tx: mpsc::UnboundedSender<AppEven
     });
 }
 
-pub fn execute_external(cmd_name: &str, args: &[&str]) -> io::Result<()> {
-    disable_raw_mode()?;
-    io::stdout().execute(LeaveAlternateScreen)?;
-    
-    println!("\n\x1b[1;36m→ Running: {} {}\x1b[0m\n", cmd_name, args.join(" "));
-    
-    let mut child = Command::new(cmd_name)
-        .args(args)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-        
-    let _ = child.wait()?;
-    
-    print!("\n\x1b[1;33mPress Enter to return to pkgtui…\x1b[0m");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    
-    io::stdout().execute(EnterAlternateScreen)?;
-    enable_raw_mode()?;
-    
-    Ok(())
-}
-
 pub fn trigger_db_reload(tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         let _ = tx.send(AppEvent::Message("Loading Core DB...".to_string(), 0, true));
@@ -242,41 +213,21 @@ pub fn trigger_db_reload(tx: mpsc::UnboundedSender<AppEvent>) {
     });
 }
 
-pub fn trigger_curl_homepage(name: String, url: String, tx: mpsc::UnboundedSender<AppEvent>) {
+pub fn trigger_open_homepage(url: String, tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
-        let _ = tx.send(AppEvent::Message(format!("Curling {}...", url), 0, true));
-        let output_file = format!("{}_homepage.html", name);
-        let res = tokio::process::Command::new("curl")
-            .args(&["-sL", "-o", &output_file, &url])
+        let res = tokio::process::Command::new("xdg-open")
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .await;
-            
+
         match res {
             Ok(status) if status.success() => {
-                let _ = tx.send(AppEvent::Message(format!("Success: Saved to {}", output_file), 5, false));
+                let _ = tx.send(AppEvent::Message(format!("Opened {}", url), 5, false));
             }
             _ => {
-                let _ = tx.send(AppEvent::Message(format!("Curl failed for {}", url), 4, false));
-            }
-        }
-    });
-}
-
-pub fn trigger_fetch_script(url: String, tx: mpsc::UnboundedSender<AppEvent>) {
-    tokio::spawn(async move {
-        let _ = tx.send(AppEvent::Message(format!("Downloading {}...", url), 0, true));
-        let output = tokio::process::Command::new("curl")
-            .args(&["-fsSL", &url])
-            .output()
-            .await;
-            
-        match output {
-            Ok(out) if out.status.success() => {
-                let content = String::from_utf8_lossy(&out.stdout).into_owned();
-                let _ = tx.send(AppEvent::ScriptFetched(url, content));
-            }
-            _ => {
-                let _ = tx.send(AppEvent::Message("Error: Failed to fetch script.".to_string(), 4, false));
+                let _ = tx.send(AppEvent::Message(format!("xdg-open failed for {}", url), 4, false));
             }
         }
     });
@@ -504,46 +455,6 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
         return false;
     }
 
-    if app.url_input_mode {
-        match key.code {
-            KeyCode::Enter => {
-                app.url_input_mode = false;
-                let url = app.url_query.trim().to_string();
-                if !url.is_empty() {
-                    trigger_fetch_script(url, tx.clone());
-                }
-            }
-            KeyCode::Esc => {
-                app.url_input_mode = false;
-            }
-            KeyCode::Backspace => {
-                app.url_query.pop();
-            }
-            KeyCode::Char(c) => {
-                app.url_query.push(c);
-            }
-            _ => {}
-        }
-        return false;
-    }
-
-    if app.script_preview.is_some() {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                if let Some((_url, content)) = app.script_preview.take() {
-                    let _ = execute_external("bash", &["-c", &content]);
-                    app.terminal_needs_clear = true;
-                    trigger_db_reload(tx.clone());
-                }
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                app.script_preview = None;
-            }
-            _ => {}
-        }
-        return false;
-    }
-
     if let Some((action, names)) = app.confirm.take() {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -673,15 +584,11 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
             if !app.view.is_empty() && app.cursor < app.view.len() {
                 let pkg = &app.pkgs[app.view[app.cursor]];
                 if !pkg.url.is_empty() && pkg.url != "None" {
-                    trigger_curl_homepage(pkg.name.clone(), pkg.url.clone(), tx.clone());
+                    trigger_open_homepage(pkg.url.clone(), tx.clone());
                 } else {
                     app.set_msg("Error: No website URL available.", 3, false);
                 }
             }
-        }
-        KeyCode::Char('E') => {
-            app.url_input_mode = true;
-            app.url_query.clear();
         }
         KeyCode::Char('i') => {
             if !app.view.is_empty() && app.cursor < app.view.len() {

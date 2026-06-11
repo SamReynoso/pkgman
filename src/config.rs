@@ -98,36 +98,71 @@ pub fn save_config(aur: bool, theme: &crate::theme::Theme) -> std::io::Result<()
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let body = format!(
-        "# pkgman configuration\n\
-         # aur: enable AUR helper (yay/paru) features. Set false for pacman-only.\n\
-         aur = {}\n\n\
-         # Theme Settings\n\
-         theme = \"{}\"\n\
-         theme_bg = \"{}\"\n\
-         theme_fg = \"{}\"\n\
-         theme_border = \"{}\"\n\
-         theme_highlight_fg = \"{}\"\n\
-         theme_highlight_bg = \"{}\"\n\
-         theme_accent = \"{}\"\n\
-         theme_selected = \"{}\"\n\
-         theme_success = \"{}\"\n\
-         theme_warning = \"{}\"\n\
-         theme_error = \"{}\"\n",
-        aur,
-        theme.name,
-        crate::theme::color_to_string(theme.background),
-        crate::theme::color_to_string(theme.foreground),
-        crate::theme::color_to_string(theme.border),
-        crate::theme::color_to_string(theme.highlight_fg),
-        crate::theme::color_to_string(theme.highlight_bg),
-        crate::theme::color_to_string(theme.accent),
-        crate::theme::color_to_string(theme.selected),
-        crate::theme::color_to_string(theme.success),
-        crate::theme::color_to_string(theme.warning),
-        crate::theme::color_to_string(theme.error)
-    );
+    let values: [(&str, String); 12] = [
+        ("aur", aur.to_string()),
+        ("theme", format!("\"{}\"", theme.name)),
+        ("theme_bg", format!("\"{}\"", crate::theme::color_to_string(theme.background))),
+        ("theme_fg", format!("\"{}\"", crate::theme::color_to_string(theme.foreground))),
+        ("theme_border", format!("\"{}\"", crate::theme::color_to_string(theme.border))),
+        ("theme_highlight_fg", format!("\"{}\"", crate::theme::color_to_string(theme.highlight_fg))),
+        ("theme_highlight_bg", format!("\"{}\"", crate::theme::color_to_string(theme.highlight_bg))),
+        ("theme_accent", format!("\"{}\"", crate::theme::color_to_string(theme.accent))),
+        ("theme_selected", format!("\"{}\"", crate::theme::color_to_string(theme.selected))),
+        ("theme_success", format!("\"{}\"", crate::theme::color_to_string(theme.success))),
+        ("theme_warning", format!("\"{}\"", crate::theme::color_to_string(theme.warning))),
+        ("theme_error", format!("\"{}\"", crate::theme::color_to_string(theme.error))),
+    ];
+
+    let body = match std::fs::read_to_string(&path) {
+        Ok(existing) => merge_config(&existing, &values),
+        Err(_) => {
+            let mut body = String::from(
+                "# pkgman configuration\n\
+                 # aur: enable AUR helper (yay/paru) features. Set false for pacman-only.\n",
+            );
+            for (i, (k, v)) in values.iter().enumerate() {
+                if i == 1 {
+                    body.push_str("\n# Theme Settings\n");
+                }
+                body.push_str(&format!("{} = {}\n", k, v));
+            }
+            body
+        }
+    };
     std::fs::write(path, body)
+}
+
+/// Update known keys in place, preserving comments, unknown keys, and
+/// formatting of everything else. Missing keys are appended at the end.
+fn merge_config(existing: &str, values: &[(&str, String)]) -> String {
+    let mut written: Vec<bool> = vec![false; values.len()];
+    let mut out = String::with_capacity(existing.len());
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        let key = if trimmed.is_empty() || trimmed.starts_with('#') {
+            None
+        } else {
+            trimmed.split_once('=').map(|(k, _)| k.trim())
+        };
+        match key.and_then(|k| values.iter().position(|(vk, _)| *vk == k)) {
+            Some(i) => {
+                out.push_str(&format!("{} = {}\n", values[i].0, values[i].1));
+                written[i] = true;
+            }
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+
+    for (i, (k, v)) in values.iter().enumerate() {
+        if !written[i] {
+            out.push_str(&format!("{} = {}\n", k, v));
+        }
+    }
+    out
 }
 
 fn config_path() -> Option<PathBuf> {

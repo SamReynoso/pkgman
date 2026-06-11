@@ -42,30 +42,27 @@ pub const NAMED_COLORS: &[Color] = &[
     Color::White,
 ];
 
-pub fn color_name(c: Color) -> &'static str {
+pub fn color_name(c: Color) -> String {
     match c {
-        Color::Reset => "Default/Reset",
-        Color::Black => "Black",
-        Color::Red => "Red",
-        Color::Green => "Green",
-        Color::Yellow => "Yellow",
-        Color::Blue => "Blue",
-        Color::Magenta => "Magenta",
-        Color::Cyan => "Cyan",
-        Color::Gray => "Gray",
-        Color::DarkGray => "Dark Gray",
-        Color::LightRed => "Light Red",
-        Color::LightGreen => "Light Green",
-        Color::LightYellow => "Light Yellow",
-        Color::LightBlue => "Light Blue",
-        Color::LightMagenta => "Light Magenta",
-        Color::LightCyan => "Light Cyan",
-        Color::White => "White",
-        Color::Rgb(r, g, b) => {
-            // Leaks a tiny string — acceptable for a debug/display helper.
-            Box::leak(format!("#{r:02X}{g:02X}{b:02X}").into_boxed_str())
-        }
-        _ => "Unknown",
+        Color::Reset => "Default/Reset".into(),
+        Color::Black => "Black".into(),
+        Color::Red => "Red".into(),
+        Color::Green => "Green".into(),
+        Color::Yellow => "Yellow".into(),
+        Color::Blue => "Blue".into(),
+        Color::Magenta => "Magenta".into(),
+        Color::Cyan => "Cyan".into(),
+        Color::Gray => "Gray".into(),
+        Color::DarkGray => "Dark Gray".into(),
+        Color::LightRed => "Light Red".into(),
+        Color::LightGreen => "Light Green".into(),
+        Color::LightYellow => "Light Yellow".into(),
+        Color::LightBlue => "Light Blue".into(),
+        Color::LightMagenta => "Light Magenta".into(),
+        Color::LightCyan => "Light Cyan".into(),
+        Color::White => "White".into(),
+        Color::Rgb(r, g, b) => format!("#{r:02X}{g:02X}{b:02X}"),
+        _ => "Unknown".into(),
     }
 }
 
@@ -391,13 +388,4 @@ pub fn resolve_theme(
             .copied()
             .unwrap_or(THEME_DEFAULT)
     }
-}
-
-/// Convenience: look up a theme by name only.
-pub fn theme_by_name(name: &str) -> Theme {
-    THEMES
-        .iter()
-        .find(|t| t.name.eq_ignore_ascii_case(name))
-        .copied()
-        .unwrap_or(THEME_DEFAULT)
 }

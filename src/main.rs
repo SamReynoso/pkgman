@@ -145,9 +145,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 AppEvent::LoadingDone => {
                     app.is_loading = false;
                 }
-                AppEvent::ScriptFetched(url, content) => {
-                    app.script_preview = Some((url, content));
-                }
                 AppEvent::ConsoleChunk(chunk) => {
                     app.write_console_chunk(&chunk);
                 }
