@@ -89,6 +89,13 @@ pub struct App {
 	pub dep_tree_content: Vec<String>,
 	pub dep_tree_pkg_name: Option<String>,
 	pub installed_pkgs: HashSet<String>,
+
+	pub show_wiki: bool,
+	pub wiki_loading: bool,
+	pub wiki_content: Vec<String>,
+	pub wiki_scroll: usize,
+	pub wiki_pkg_name: String,
+	pub wiki_err_msg: Option<String>,
 }
 
 impl App {
@@ -160,6 +167,13 @@ impl App {
 			dep_tree_content: Vec::new(),
 			dep_tree_pkg_name: None,
 			installed_pkgs: HashSet::new(),
+
+			show_wiki: false,
+			wiki_loading: false,
+			wiki_content: Vec::new(),
+			wiki_scroll: 0,
+			wiki_pkg_name: String::new(),
+			wiki_err_msg: None,
 		}
 	}
 
@@ -299,7 +313,8 @@ impl App {
 	}
 
 	pub fn update_installed_cache(&mut self) {
-		self.installed_pkgs = self.pkgs
+		self.installed_pkgs = self
+			.pkgs
 			.iter()
 			.filter(|p| p.installed)
 			.map(|p| p.name.clone())

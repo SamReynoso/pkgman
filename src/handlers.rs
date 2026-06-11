@@ -276,11 +276,7 @@ pub fn trigger_open_homepage(url: String, tx: mpsc::UnboundedSender<AppEvent>) {
 	});
 }
 
-pub fn trigger_dep_tree_fetch(
-	name: String,
-	installed: bool,
-	tx: mpsc::UnboundedSender<AppEvent>,
-) {
+pub fn trigger_dep_tree_fetch(name: String, installed: bool, tx: mpsc::UnboundedSender<AppEvent>) {
 	tokio::spawn(async move {
 		let mut cmd = tokio::process::Command::new("pactree");
 		cmd.arg("-a");
@@ -298,7 +294,8 @@ pub fn trigger_dep_tree_fetch(
 				let _ = tx.send(AppEvent::DepTreeLoaded(name, Ok(tree)));
 			}
 			Ok(out) => {
-				let err_msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+				let err_msg =
+					String::from_utf8_lossy(&out.stderr).trim().to_string();
 				let _ = tx.send(AppEvent::DepTreeLoaded(name, Err(err_msg)));
 			}
 			Err(e) => {
@@ -307,7 +304,6 @@ pub fn trigger_dep_tree_fetch(
 		}
 	});
 }
-
 
 pub fn trigger_aur_search(query: String, tx: mpsc::UnboundedSender<AppEvent>) {
 	tokio::spawn(async move {
@@ -424,6 +420,38 @@ pub fn trigger_aur_search(query: String, tx: mpsc::UnboundedSender<AppEvent>) {
 
 pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
 	let prev_cursor = app.cursor;
+
+	if app.show_wiki {
+		match key.code {
+			KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('Q') => {
+				app.show_wiki = false;
+				app.wiki_content.clear();
+				app.wiki_err_msg = None;
+			}
+			KeyCode::Up | KeyCode::Char('k') => {
+				app.wiki_scroll = app.wiki_scroll.saturating_sub(1);
+			}
+			KeyCode::Down | KeyCode::Char('j') => {
+				app.wiki_scroll = app.wiki_scroll.saturating_add(1);
+			}
+			KeyCode::PageUp => {
+				app.wiki_scroll = app.wiki_scroll.saturating_sub(20);
+			}
+			KeyCode::PageDown => {
+				app.wiki_scroll = app.wiki_scroll.saturating_add(20);
+			}
+			KeyCode::Char('w') => {
+				let url = format!(
+					"https://wiki.archlinux.org/index.php?search={}",
+					app.wiki_pkg_name
+				);
+				trigger_open_homepage(url, tx.clone());
+			}
+			_ => {}
+		}
+		return false;
+	}
+
 	if app.theme_builder_open {
 		match key.code {
 			KeyCode::Esc | KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Enter => {
@@ -533,7 +561,14 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 				app.pending_action = None;
 			}
 			KeyCode::Backspace => {
-				app.sudo_password.pop();
+				if key.modifiers.contains(KeyModifiers::CONTROL) {
+					delete_last_word(&mut app.sudo_password);
+				} else {
+					app.sudo_password.pop();
+				}
+			}
+			KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+				delete_last_word(&mut app.sudo_password);
 			}
 			KeyCode::Char(c) => {
 				app.sudo_password.push(c);
@@ -625,7 +660,15 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 				app.search_mode = false;
 			}
 			KeyCode::Backspace => {
-				app.query.pop();
+				if key.modifiers.contains(KeyModifiers::CONTROL) {
+					delete_last_word(&mut app.query);
+				} else {
+					app.query.pop();
+				}
+				app.needs_filter = true;
+			}
+			KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+				delete_last_word(&mut app.query);
 				app.needs_filter = true;
 			}
 			KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -721,6 +764,22 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 				app.set_msg("Error: No website URL available.", 3, false);
 			}
 		}
+		KeyCode::Char('w') if !app.view.is_empty() && app.cursor < app.view.len() => {
+			let pkg_name = app.pkgs[app.view[app.cursor]].name.clone();
+			let url =
+				format!("https://wiki.archlinux.org/index.php?search={}", pkg_name);
+			trigger_open_homepage(url, tx.clone());
+		}
+		KeyCode::Char('W') if !app.view.is_empty() && app.cursor < app.view.len() => {
+			let pkg_name = app.pkgs[app.view[app.cursor]].name.clone();
+			app.show_wiki = true;
+			app.wiki_loading = true;
+			app.wiki_pkg_name = pkg_name.clone();
+			app.wiki_content.clear();
+			app.wiki_err_msg = None;
+			app.wiki_scroll = 0;
+			trigger_wiki_fetch(pkg_name, tx.clone());
+		}
 		KeyCode::Char('i') if !app.view.is_empty() && app.cursor < app.view.len() => {
 			let name = app.pkgs[app.view[app.cursor]].name.clone();
 			let names = if app.selected.is_empty() {
@@ -765,12 +824,17 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 		KeyCode::Char('v') | KeyCode::Char('V') => {
 			app.show_dep_tree = !app.show_dep_tree;
 			app.detail_top = 0; // reset scroll
-			if app.show_dep_tree && !app.view.is_empty() && app.cursor < app.view.len() {
+			if app.show_dep_tree && !app.view.is_empty() && app.cursor < app.view.len()
+			{
 				let pkg = &app.pkgs[app.view[app.cursor]];
 				if app.dep_tree_pkg_name.as_ref() != Some(&pkg.name) {
 					app.dep_tree_loading = true;
 					app.dep_tree_content.clear();
-					trigger_dep_tree_fetch(pkg.name.clone(), pkg.installed, tx.clone());
+					trigger_dep_tree_fetch(
+						pkg.name.clone(),
+						pkg.installed,
+						tx.clone(),
+					);
 				}
 			}
 		}
@@ -789,4 +853,300 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 	}
 
 	false
+}
+
+pub fn trigger_wiki_fetch(pkg_name: String, tx: mpsc::UnboundedSender<AppEvent>) {
+	tokio::spawn(async move {
+		let res = match fetch_wiki_text(&pkg_name).await {
+			Ok(text) => {
+				let cleaned = clean_wikitext(&text);
+				let lines = cleaned
+					.lines()
+					.map(|s| s.to_string())
+					.collect::<Vec<String>>();
+				Ok(lines)
+			}
+			Err(e) => Err(e),
+		};
+		let _ = tx.send(AppEvent::WikiLoaded(pkg_name, res));
+	});
+}
+
+async fn fetch_wiki_text(pkg_name: &str) -> Result<String, String> {
+	// 1. Try exact name query
+	match fetch_revisions_api(pkg_name).await {
+		Ok(content) => return Ok(content),
+		Err(e) if e == "Missing" => {}
+		Err(e) => return Err(e),
+	}
+
+	// 2. Try base name query (e.g. python-pip -> pip)
+	let base = base_package_name(pkg_name);
+	if base != pkg_name {
+		match fetch_revisions_api(base).await {
+			Ok(content) => return Ok(content),
+			Err(e) if e == "Missing" => {}
+			Err(e) => return Err(e),
+		}
+	}
+
+	// 3. Try search API for exact name
+	if let Some(title) = search_wiki_title(pkg_name).await? {
+		match fetch_revisions_api(&title).await {
+			Ok(content) => return Ok(content),
+			Err(e) if e == "Missing" => {}
+			Err(e) => return Err(e),
+		}
+	}
+
+	// 4. Try search API for base name
+	if base != pkg_name
+		&& let Some(title) = search_wiki_title(base).await?
+		&& let Ok(content) = fetch_revisions_api(&title).await
+	{
+		return Ok(content);
+	}
+
+	Err(format!("No wiki page found for '{}'", pkg_name))
+}
+
+async fn fetch_revisions_api(title: &str) -> Result<String, String> {
+	let url = format!(
+		"https://wiki.archlinux.org/api.php?action=query&prop=revisions&titles={}&rvslots=main&rvprop=content&format=json&redirects=1",
+		url_encode(title)
+	);
+
+	let output = tokio::process::Command::new("curl")
+		.args(["-sL", &url])
+		.output()
+		.await
+		.map_err(|e| format!("Failed to execute curl: {}", e))?;
+
+	if !output.status.success() {
+		return Err("Curl request failed".to_string());
+	}
+
+	let json_str = String::from_utf8_lossy(&output.stdout);
+	let val: serde_json::Value =
+		serde_json::from_str(&json_str).map_err(|e| format!("JSON parse error: {}", e))?;
+
+	if let Some(pages) = val["query"]["pages"].as_object() {
+		for (_id, page) in pages {
+			if page["missing"].is_string() {
+				return Err("Missing".to_string());
+			}
+			if let Some(revisions) = page["revisions"].as_array()
+				&& let Some(rev) = revisions.first()
+				&& let Some(content) = rev["slots"]["main"]["*"].as_str()
+			{
+				return Ok(content.to_string());
+			}
+		}
+	}
+
+	Err("Invalid API response structure".to_string())
+}
+
+async fn search_wiki_title(query: &str) -> Result<Option<String>, String> {
+	let url = format!(
+		"https://wiki.archlinux.org/api.php?action=query&list=search&srsearch={}&format=json",
+		url_encode(query)
+	);
+
+	let output = tokio::process::Command::new("curl")
+		.args(["-sL", &url])
+		.output()
+		.await
+		.map_err(|e| format!("Failed to execute curl: {}", e))?;
+
+	if !output.status.success() {
+		return Err("Curl request failed".to_string());
+	}
+
+	let json_str = String::from_utf8_lossy(&output.stdout);
+	let val: serde_json::Value =
+		serde_json::from_str(&json_str).map_err(|e| format!("JSON parse error: {}", e))?;
+
+	if let Some(search_results) = val["query"]["search"].as_array()
+		&& let Some(first_result) = search_results.first()
+		&& let Some(title) = first_result["title"].as_str()
+	{
+		return Ok(Some(title.to_string()));
+	}
+
+	Ok(None)
+}
+
+fn base_package_name(name: &str) -> &str {
+	if let Some(rest) = name.strip_prefix("python-") {
+		rest
+	} else if let Some(rest) = name.strip_prefix("rust-") {
+		rest
+	} else if let Some(rest) = name.strip_prefix("ruby-") {
+		rest
+	} else if let Some(rest) = name.strip_prefix("perl-") {
+		rest
+	} else if let Some(rest) = name.strip_prefix("php-") {
+		rest
+	} else if let Some(rest) = name.strip_prefix("go-") {
+		rest
+	} else if let Some(rest) = name.strip_prefix("nodejs-") {
+		rest
+	} else if let Some(rest) = name.strip_prefix("lib") {
+		rest
+	} else {
+		name
+	}
+}
+
+fn url_encode(s: &str) -> String {
+	let mut encoded = String::new();
+	for c in s.chars() {
+		if c.is_ascii_alphanumeric()
+			|| c == '.' || c == '_'
+			|| c == '+' || c == '-'
+			|| c == '@'
+		{
+			encoded.push(c);
+		} else if c == ' ' {
+			encoded.push_str("%20");
+		} else {
+			encoded.push_str(&format!("%{:02X}", c as u32));
+		}
+	}
+	encoded
+}
+
+fn clean_wikitext(text: &str) -> String {
+	let mut result = String::new();
+	for line in text.lines() {
+		let trimmed = line.trim();
+		// Skip categories and language links
+		if trimmed.starts_with("[[Category:") {
+			continue;
+		}
+		// Language links: e.g. [[de:Python]]
+		if trimmed.starts_with("[[")
+			&& trimmed.ends_with("]]")
+			&& trimmed.contains(':')
+			&& !trimmed.contains("Wikipedia:")
+		{
+			let inner = &trimmed[2..trimmed.len() - 2];
+			if let Some(colon_idx) = inner.find(':') {
+				let prefix = &inner[..colon_idx];
+				if prefix.len() <= 10
+					&& prefix
+						.chars()
+						.all(|c| c.is_ascii_lowercase() || c == '-')
+				{
+					continue;
+				}
+			}
+		}
+		// Skip template starts/ends/contents
+		if trimmed.starts_with("{{")
+			|| trimmed.starts_with("}}")
+			|| trimmed.starts_with("|")
+		{
+			continue;
+		}
+
+		// Process the line to resolve internal/external links and formatting
+		let mut cleaned_line = String::new();
+		let chars = line.chars().collect::<Vec<char>>();
+		let mut i = 0;
+		while i < chars.len() {
+			// Internal links: [[PageName|Display]] or [[PageName]]
+			if i + 1 < chars.len() && chars[i] == '[' && chars[i + 1] == '[' {
+				let mut found_close = false;
+				let mut close_idx = 0;
+				for j in i + 2..chars.len() - 1 {
+					if chars[j] == ']' && chars[j + 1] == ']' {
+						found_close = true;
+						close_idx = j;
+						break;
+					}
+				}
+				if found_close {
+					let inner =
+						chars[i + 2..close_idx].iter().collect::<String>();
+					if let Some(pipe_idx) = inner.find('|') {
+						let display = &inner[pipe_idx + 1..];
+						cleaned_line.push_str(display);
+					} else {
+						cleaned_line.push_str(&inner);
+					}
+					i = close_idx + 2;
+					continue;
+				}
+			}
+			// External links: [url Display] or [url]
+			if chars[i] == '['
+				&& let Some(offset) = chars[i + 1..].iter().position(|&c| c == ']')
+			{
+				let close_idx = i + 1 + offset;
+				let inner =
+					chars[i + 1..close_idx].iter().collect::<String>();
+				if let Some(space_idx) = inner.find(' ') {
+					let url = &inner[..space_idx];
+					let display = &inner[space_idx + 1..];
+					cleaned_line.push_str(&format!(
+						"{} ({})",
+						display, url
+					));
+				} else {
+					cleaned_line.push_str(&inner);
+				}
+				i = close_idx + 1;
+				continue;
+			}
+			// Bold/Italics: '' or '''
+			if chars[i] == '\'' {
+				while i < chars.len() && chars[i] == '\'' {
+					i += 1;
+				}
+				continue;
+			}
+
+			cleaned_line.push(chars[i]);
+			i += 1;
+		}
+
+		result.push_str(&cleaned_line);
+		result.push('\n');
+	}
+	result
+}
+
+fn delete_last_word(s: &mut String) {
+	// 1. Pop all trailing whitespace
+	while let Some(c) = s.chars().next_back() {
+		if c.is_whitespace() {
+			s.pop();
+		} else {
+			break;
+		}
+	}
+
+	// 2. If empty, return
+	if s.is_empty() {
+		return;
+	}
+
+	// 3. Check if the last character is a boundary symbol
+	if let Some(c) = s.chars().next_back()
+		&& (c == '-' || c == '_' || c == '/' || c == '.' || c == '@' || c == ':')
+	{
+		s.pop();
+		return;
+	}
+
+	// 4. Pop consecutive word characters (alphanumeric)
+	while let Some(c) = s.chars().next_back() {
+		if c.is_alphanumeric() {
+			s.pop();
+		} else {
+			break;
+		}
+	}
 }

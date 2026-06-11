@@ -41,24 +41,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	// Channel for application event passing
 	let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
-	// Spawn input key event listener task
+	// Spawn input key event listener task using blocking reader
 	let tx_key = tx.clone();
-	tokio::spawn(async move {
-		loop {
-			if ct_event::poll(Duration::from_millis(10)).unwrap_or(false)
-				&& let Ok(ev) = ct_event::read()
-			{
-				match ev {
-					CrosstermEvent::Key(key) => {
-						let _ = tx_key.send(AppEvent::Key(key));
-					}
-					CrosstermEvent::Resize(_, _) => {
-						let _ = tx_key.send(AppEvent::Resize);
-					}
-					_ => {}
-				}
+	tokio::task::spawn_blocking(move || {
+		while let Ok(ev) = ct_event::read() {
+			match ev {
+				CrosstermEvent::Key(key) if tx_key.send(AppEvent::Key(key)).is_err() => break,
+				CrosstermEvent::Resize(_, _) if tx_key.send(AppEvent::Resize).is_err() => break,
+				_ => {}
 			}
-			tokio::time::sleep(Duration::from_millis(10)).await;
 		}
 	});
 
@@ -96,134 +87,167 @@ async fn main() -> Result<(), Box<dyn Error>> {
 		terminal.draw(|f| ui::render(f, &mut app))?;
 
 		if let Some(event) = rx.recv().await {
-			match event {
-				AppEvent::Tick => {
-					if app.is_loading {
-						app.spinner_tick += 1;
-					}
-					app.check_msg_expiry();
+			let mut events = vec![event];
+			while let Ok(ev) = rx.try_recv() {
+				events.push(ev);
+			}
 
-					// Check if we need to fetch details for selected AUR package
-					if !app.view.is_empty() && app.cursor < app.view.len() {
-						let idx = app.view[app.cursor];
-						if idx < app.pkgs.len()
-							&& config::cfg().aur && app.pkgs[idx].repo
-							== "aur" && app.pkgs[idx].desc == "AUR Package"
-							&& app.last_cursor_change.elapsed()
-								> Duration::from_millis(300)
-						{
-							let name = app.pkgs[idx].name.clone();
-							// Mark as fetching so we don't spawn multiple tasks
-							app.pkgs[idx].desc =
-								"Fetching details...".to_string();
-							handlers::trigger_aur_details_fetch(
-								name,
-								tx.clone(),
-							);
+			let mut should_break = false;
+			for ev in events {
+				match ev {
+					AppEvent::Tick => {
+						if app.is_loading {
+							app.spinner_tick += 1;
 						}
-					}
+						app.check_msg_expiry();
 
-					// Check if we need to fetch the dependency tree
-					if app.show_dep_tree && !app.view.is_empty() && app.cursor < app.view.len() {
-						let idx = app.view[app.cursor];
-						if idx < app.pkgs.len() {
-							let name = &app.pkgs[idx].name;
-							if app.dep_tree_pkg_name.as_ref() != Some(name)
-								&& !app.dep_tree_loading
-								&& app.last_cursor_change.elapsed() > Duration::from_millis(250)
+						// Check if we need to fetch details for selected AUR package
+						if !app.view.is_empty() && app.cursor < app.view.len() {
+							let idx = app.view[app.cursor];
+							if idx < app.pkgs.len()
+								&& config::cfg().aur && app.pkgs[idx].repo
+								== "aur" && app.pkgs[idx].desc == "AUR Package"
+								&& app.last_cursor_change.elapsed()
+									> Duration::from_millis(300)
 							{
-								app.dep_tree_loading = true;
-								app.dep_tree_content.clear();
-								handlers::trigger_dep_tree_fetch(
-									name.clone(),
-									app.pkgs[idx].installed,
+								let name = app.pkgs[idx].name.clone();
+								// Mark as fetching so we don't spawn multiple tasks
+								app.pkgs[idx].desc =
+									"Fetching details...".to_string();
+								handlers::trigger_aur_details_fetch(
+									name,
 									tx.clone(),
 								);
 							}
 						}
-					}
-				}
-				AppEvent::Key(key) => {
-					if handle_key(key, &mut app, &tx) {
-						break; // Exit loop
-					}
-				}
-				AppEvent::DbLoaded(pkgs) => {
-					app.pkgs = pkgs;
-					app.update_installed_cache();
-					app.needs_filter = true;
-				}
-				AppEvent::AurLoaded(aur) => {
-					let known: std::collections::HashSet<String> =
-						app.pkgs.iter().map(|p| p.name.clone()).collect();
-					for a in aur {
-						if !known.contains(&a.name) {
-							app.pkgs.push(a);
+
+						// Check if we need to fetch the dependency tree
+						if app.show_dep_tree
+							&& !app.view.is_empty() && app.cursor < app.view.len()
+						{
+							let idx = app.view[app.cursor];
+							if idx < app.pkgs.len() {
+								let name = &app.pkgs[idx].name;
+								if app.dep_tree_pkg_name.as_ref()
+									!= Some(name) && !app.dep_tree_loading
+									&& app.last_cursor_change.elapsed()
+										> Duration::from_millis(250)
+								{
+									app.dep_tree_loading = true;
+									app.dep_tree_content.clear();
+									handlers::trigger_dep_tree_fetch(
+										name.clone(),
+										app.pkgs[idx].installed,
+										tx.clone(),
+									);
+								}
+							}
 						}
 					}
-					app.update_installed_cache();
-					app.is_loading = false;
-					let count = app.pkgs.len();
-					app.set_msg(
-						&format!("Loaded {} packages.", count),
-						4,
-						false,
-					);
-					app.needs_filter = true;
-				}
-				AppEvent::Message(msg, secs, keep) => {
-					app.set_msg(&msg, secs, keep);
-				}
-				AppEvent::LoadingDone => {
-					app.is_loading = false;
-				}
-				AppEvent::ConsoleChunk(chunk) => {
-					app.write_console_chunk(&chunk);
-				}
-				AppEvent::ConsoleFinished(success) => {
-					app.console_finished = Some(success);
-					app.is_loading = false;
-					if success {
-						trigger_db_reload(tx.clone());
+					AppEvent::Key(key) => {
+						if handle_key(key, &mut app, &tx) {
+							should_break = true;
+						}
 					}
-				}
-				AppEvent::Resize => {
-					let _ = terminal.clear();
-				}
-				AppEvent::AurDetailsLoaded(fetched) => {
-					if let Some(idx) =
-						app.pkgs.iter().position(|p| p.name == fetched.name)
-					{
-						let installed = app.pkgs[idx].installed;
-						let upgradable = app.pkgs[idx].upgradable;
-						app.pkgs[idx] = *fetched;
-						app.pkgs[idx].installed = installed;
-						app.pkgs[idx].upgradable = upgradable;
-						app.pkgs[idx].repo = "aur".to_string();
+					AppEvent::DbLoaded(pkgs) => {
+						app.pkgs = pkgs;
+						app.update_installed_cache();
+						app.needs_filter = true;
 					}
-					app.update_installed_cache();
-				}
-				AppEvent::DepTreeLoaded(pkg_name, res) => {
-					if !app.view.is_empty() && app.cursor < app.view.len() {
-						let current_pkg_name = &app.pkgs[app.view[app.cursor]].name;
-						if current_pkg_name == &pkg_name {
-							app.dep_tree_loading = false;
+					AppEvent::AurLoaded(aur) => {
+						let known: std::collections::HashSet<String> =
+							app.pkgs.iter().map(|p| p.name.clone()).collect();
+						for a in aur {
+							if !known.contains(&a.name) {
+								app.pkgs.push(a);
+							}
+						}
+						app.update_installed_cache();
+						app.is_loading = false;
+						let count = app.pkgs.len();
+						app.set_msg(
+							&format!("Loaded {} packages.", count),
+							4,
+							false,
+						);
+						app.needs_filter = true;
+					}
+					AppEvent::Message(msg, secs, keep) => {
+						app.set_msg(&msg, secs, keep);
+					}
+					AppEvent::LoadingDone => {
+						app.is_loading = false;
+					}
+					AppEvent::ConsoleChunk(chunk) => {
+						app.write_console_chunk(&chunk);
+					}
+					AppEvent::ConsoleFinished(success) => {
+						app.console_finished = Some(success);
+						app.is_loading = false;
+						if success {
+							trigger_db_reload(tx.clone());
+						}
+					}
+					AppEvent::Resize => {
+						let _ = terminal.clear();
+					}
+					AppEvent::AurDetailsLoaded(fetched) => {
+						if let Some(idx) =
+							app.pkgs.iter().position(|p| p.name == fetched.name)
+						{
+							let installed = app.pkgs[idx].installed;
+							let upgradable = app.pkgs[idx].upgradable;
+							app.pkgs[idx] = *fetched;
+							app.pkgs[idx].installed = installed;
+							app.pkgs[idx].upgradable = upgradable;
+							app.pkgs[idx].repo = "aur".to_string();
+						}
+						app.update_installed_cache();
+					}
+					AppEvent::DepTreeLoaded(pkg_name, res) => {
+						if !app.view.is_empty() && app.cursor < app.view.len() {
+							let current_pkg_name =
+								&app.pkgs[app.view[app.cursor]].name;
+							if current_pkg_name == &pkg_name {
+								app.dep_tree_loading = false;
+								match res {
+									Ok(tree) => {
+										app.dep_tree_content = tree;
+										app.dep_tree_pkg_name =
+											Some(pkg_name);
+									}
+									Err(err) => {
+										app.dep_tree_content =
+											vec![
+											"Error loading dependency tree:".to_string(),
+											err,
+										];
+										app.dep_tree_pkg_name =
+											Some(pkg_name);
+									}
+								}
+							}
+						}
+					}
+					AppEvent::WikiLoaded(pkg_name, res) => {
+						if app.show_wiki && app.wiki_pkg_name == pkg_name {
+							app.wiki_loading = false;
 							match res {
-								Ok(tree) => {
-									app.dep_tree_content = tree;
-									app.dep_tree_pkg_name = Some(pkg_name);
+								Ok(lines) => {
+									app.wiki_content = lines;
+									app.wiki_err_msg = None;
 								}
 								Err(err) => {
-									app.dep_tree_content = vec![
-										"Error loading dependency tree:".to_string(),
-										err,
-									];
-									app.dep_tree_pkg_name = Some(pkg_name);
+									app.wiki_content = Vec::new();
+									app.wiki_err_msg = Some(err);
 								}
 							}
 						}
 					}
 				}
+			}
+			if should_break {
+				break;
 			}
 		}
 	}

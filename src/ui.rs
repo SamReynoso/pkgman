@@ -4,8 +4,8 @@ use ratatui::{
 	style::{Color, Modifier, Style},
 	text::{Line, Span},
 	widgets::{
-		Block, Borders, Clear, List, ListItem, Paragraph, Wrap,
-		Scrollbar, ScrollbarOrientation, ScrollbarState,
+		Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+		ScrollbarState, Wrap,
 	},
 };
 
@@ -32,6 +32,8 @@ const HELP_LINES: &[(&str, &str)] = &[
 	("u", "Update selected"),
 	("r", "Remove selected"),
 	("d", "Open website (xdg-open)"),
+	("w", "Open ArchWiki in browser"),
+	("W (shift)", "Fetch ArchWiki summary inline"),
 	("R (shift)", "Reload packages"),
 	("s", "Cycle sort mode"),
 	("t", "Theme Selector / Builder"),
@@ -106,6 +108,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
 	}
 	if app.theme_builder_open {
 		render_theme_builder_overlay(f, size, app);
+	}
+	if app.show_wiki {
+		render_wiki_overlay(f, size, app);
 	}
 }
 
@@ -430,35 +435,39 @@ fn render_empty_detail(f: &mut Frame, area: Rect, theme: &crate::theme::Theme) {
 fn parse_tree_line(line: &str) -> (String, String, Option<String>) {
 	let last_idx = line.rfind(['|', '`']);
 	let (prefix, remainder) = match last_idx {
-		Some(idx) if idx + 2 <= line.len() => {
-			(&line[0..idx + 2], &line[idx + 2..])
-		}
+		Some(idx) if idx + 2 <= line.len() => (&line[0..idx + 2], &line[idx + 2..]),
 		_ => ("", line),
 	};
 
 	if let Some(pos) = remainder.find(" provides ") {
 		let pkg = &remainder[..pos];
 		let provides = &remainder[pos + " provides ".len()..];
-		(prefix.to_string(), pkg.to_string(), Some(provides.to_string()))
+		(
+			prefix.to_string(),
+			pkg.to_string(),
+			Some(provides.to_string()),
+		)
 	} else {
 		(prefix.to_string(), remainder.to_string(), None)
 	}
 }
 
-fn render_dep_tree(
-	f: &mut Frame,
-	app: &mut App,
-	area: Rect,
-) {
+fn render_dep_tree(f: &mut Frame, app: &mut App, area: Rect) {
 	let theme = &app.theme;
 	let val = Style::default().fg(theme.foreground);
 
 	let mut lines: Vec<Line> = Vec::new();
 
 	if app.dep_tree_loading {
-		lines.push(Line::from(Span::styled("  Loading dependency tree...", val)));
+		lines.push(Line::from(Span::styled(
+			"  Loading dependency tree...",
+			val,
+		)));
 	} else if app.dep_tree_content.is_empty() {
-		lines.push(Line::from(Span::styled("  No dependency tree available.", val)));
+		lines.push(Line::from(Span::styled(
+			"  No dependency tree available.",
+			val,
+		)));
 	} else {
 		for (line_idx, raw_line) in app.dep_tree_content.iter().enumerate() {
 			let (prefix, pkg, provides) = parse_tree_line(raw_line);
@@ -485,7 +494,10 @@ fn render_dep_tree(
 			spans.push(Span::styled(pkg, pkg_style));
 
 			if let Some(target) = provides {
-				spans.push(Span::styled(" provides ", Style::default().fg(theme.border)));
+				spans.push(Span::styled(
+					" provides ",
+					Style::default().fg(theme.border),
+				));
 				spans.push(Span::styled(target, Style::default().fg(theme.accent)));
 			}
 
@@ -575,12 +587,7 @@ fn wrap_field(
 		.collect()
 }
 
-fn render_detail_info(
-	f: &mut Frame,
-	pkg: &crate::app::Package,
-	area: Rect,
-	app: &mut App,
-) {
+fn render_detail_info(f: &mut Frame, pkg: &crate::app::Package, area: Rect, app: &mut App) {
 	let theme = &app.theme;
 	let kw = 16; // label width
 	let sep = Style::default().fg(theme.border);
@@ -971,7 +978,7 @@ fn render_context_panel(f: &mut Frame, app: &App, area: Rect) {
 fn render_footer(f: &mut Frame, app: &mut App, area: Rect) {
 	app.check_msg_expiry();
 
-	let keys = " [/] Search │ [Space] Select │ [1-7] Tabs │ [t] Theme │ [?] Help │ [q] Quit ";
+	let keys = " [/] Search │ [Space] Select │ [w/W] Wiki │ [1-7] Tabs │ [t] Theme │ [?] Help │ [q] Quit ";
 	f.render_widget(
 		Paragraph::new(keys).style(Style::default()
 			.fg(app.theme.border)
@@ -1446,4 +1453,106 @@ fn render_theme_builder_overlay(f: &mut Frame, area: Rect, app: &App) {
 
 	f.render_widget(mock_btn1, button_layout[0]);
 	f.render_widget(mock_btn2, button_layout[1]);
+}
+
+fn render_wiki_overlay(f: &mut Frame, area: Rect, app: &mut App) {
+	let popup = centered_rect(80, 80, area);
+	f.render_widget(Clear, popup);
+
+	let block = Block::default()
+		.borders(Borders::ALL)
+		.title(Span::styled(
+			format!(" ArchWiki: {} ", app.wiki_pkg_name),
+			Style::default()
+				.fg(app.theme.accent)
+				.add_modifier(Modifier::BOLD),
+		))
+		.border_style(Style::default().fg(app.theme.accent))
+		.style(Style::default().bg(app.theme.background));
+
+	let inner = block.inner(popup);
+	f.render_widget(block, popup);
+
+	let mut lines = Vec::new();
+
+	if app.wiki_loading {
+		lines.push(Line::from(vec![Span::styled(
+			"Fetching summary from ArchWiki...",
+			Style::default().fg(app.theme.foreground),
+		)]));
+	} else if let Some(err) = &app.wiki_err_msg {
+		lines.push(Line::from(vec![
+			Span::styled(
+				"Error: ",
+				Style::default()
+					.fg(app.theme.error)
+					.add_modifier(Modifier::BOLD),
+			),
+			Span::styled(err, Style::default().fg(app.theme.foreground)),
+		]));
+	} else if app.wiki_content.is_empty() {
+		lines.push(Line::from(vec![Span::styled(
+			"No summary found.",
+			Style::default().fg(app.theme.border),
+		)]));
+	} else {
+		for l in &app.wiki_content {
+			lines.push(Line::from(Span::styled(
+				l.clone(),
+				Style::default().fg(app.theme.foreground),
+			)));
+		}
+	}
+
+	let content_length = lines.len();
+	let max_scroll = content_length.saturating_sub(inner.height.saturating_sub(2) as usize);
+	if app.wiki_scroll > max_scroll {
+		app.wiki_scroll = max_scroll;
+	}
+	let scroll = app.wiki_scroll as u16;
+
+	let text_area = Rect {
+		x: inner.x,
+		y: inner.y,
+		width: inner.width.saturating_sub(1),
+		height: inner.height.saturating_sub(1), // reserve 1 line for instructions
+	};
+
+	let paragraph = Paragraph::new(lines)
+		.wrap(Wrap { trim: false })
+		.scroll((scroll, 0));
+
+	f.render_widget(paragraph, text_area);
+
+	// Render scrollbar if needed
+	if content_length > inner.height as usize {
+		let scrollbar = Scrollbar::default()
+			.orientation(ScrollbarOrientation::VerticalRight)
+			.begin_symbol(Some("▲"))
+			.end_symbol(Some("▼"))
+			.track_symbol(Some("│"))
+			.thumb_symbol("█")
+			.style(Style::default().fg(app.theme.border));
+		let mut scrollbar_state = ScrollbarState::default()
+			.content_length(content_length)
+			.position(scroll as usize);
+		f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+	}
+
+	// Render instructions at the bottom of the popup
+	let footer_area = Rect {
+		x: inner.x,
+		y: inner.bottom().saturating_sub(1),
+		width: inner.width,
+		height: 1,
+	};
+	let footer_text = "  ↑/↓ Scroll │ [w] Open in Browser │ [Esc/Enter/q] Close ";
+	f.render_widget(
+		Paragraph::new(footer_text)
+			.style(Style::default()
+				.fg(app.theme.border)
+				.bg(app.theme.background))
+			.alignment(Alignment::Center),
+		footer_area,
+	);
 }

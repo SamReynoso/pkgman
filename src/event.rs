@@ -10,4 +10,5 @@ pub enum AppEvent {
 	Resize,
 	AurDetailsLoaded(Box<crate::app::Package>),
 	DepTreeLoaded(String, Result<Vec<String>, String>),
+	WikiLoaded(String, Result<Vec<String>, String>),
 }
