@@ -9,170 +9,185 @@ use app::App;
 use event::AppEvent;
 use handlers::{handle_key, trigger_db_reload};
 
-use std::{error::Error, io, time::Duration};
 use crossterm::{
-    event::{self as ct_event, Event as CrosstermEvent},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+	event::{self as ct_event, Event as CrosstermEvent},
+	execute,
+	terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::{error::Error, io, time::Duration};
 use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Check if pacman command is available on user's system
-    if std::process::Command::new("which")
-        .arg("pacman")
-        .output()
-        .map(|o| !o.status.success())
-        .unwrap_or(true)
-    {
-        eprintln!("Error: pacman not found on this system.");
-        std::process::exit(1);
-    }
+	// Check if pacman command is available on user's system
+	if std::process::Command::new("which")
+		.arg("pacman")
+		.output()
+		.map(|o| !o.status.success())
+		.unwrap_or(true)
+	{
+		eprintln!("Error: pacman not found on this system.");
+		std::process::exit(1);
+	}
 
-    // Initialize raw terminal mode
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+	// Initialize raw terminal mode
+	enable_raw_mode()?;
+	let mut stdout = io::stdout();
+	execute!(stdout, EnterAlternateScreen)?;
+	let backend = CrosstermBackend::new(stdout);
+	let mut terminal = Terminal::new(backend)?;
 
-    // Channel for application event passing
-    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+	// Channel for application event passing
+	let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    // Spawn input key event listener task
-    let tx_key = tx.clone();
-    tokio::spawn(async move {
-        loop {
-            if ct_event::poll(Duration::from_millis(10)).unwrap_or(false)
-                && let Ok(ev) = ct_event::read() {
-                    match ev {
-                        CrosstermEvent::Key(key) => {
-                            let _ = tx_key.send(AppEvent::Key(key));
-                        }
-                        CrosstermEvent::Resize(_, _) => {
-                            let _ = tx_key.send(AppEvent::Resize);
-                        }
-                        _ => {}
-                    }
-                }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    });
+	// Spawn input key event listener task
+	let tx_key = tx.clone();
+	tokio::spawn(async move {
+		loop {
+			if ct_event::poll(Duration::from_millis(10)).unwrap_or(false)
+				&& let Ok(ev) = ct_event::read()
+			{
+				match ev {
+					CrosstermEvent::Key(key) => {
+						let _ = tx_key.send(AppEvent::Key(key));
+					}
+					CrosstermEvent::Resize(_, _) => {
+						let _ = tx_key.send(AppEvent::Resize);
+					}
+					_ => {}
+				}
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	});
 
-    // Spawn tick generator task
-    let tx_tick = tx.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let _ = tx_tick.send(AppEvent::Tick);
-        }
-    });
+	// Spawn tick generator task
+	let tx_tick = tx.clone();
+	tokio::spawn(async move {
+		loop {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			let _ = tx_tick.send(AppEvent::Tick);
+		}
+	});
 
-    // Initialize App State
-    let mut app = App::new();
-    app.is_loading = true;
-    
-    // Initial package DB loading trigger
-    trigger_db_reload(tx.clone());
+	// Initialize App State
+	let mut app = App::new();
+	app.is_loading = true;
 
-    // Clear terminal screen on startup
-    let _ = terminal.clear();
+	// Initial package DB loading trigger
+	trigger_db_reload(tx.clone());
 
-    // Main event loop
-    loop {
-        if app.terminal_needs_clear {
-            let _ = terminal.clear();
-            app.terminal_needs_clear = false;
-        }
+	// Clear terminal screen on startup
+	let _ = terminal.clear();
 
-        if app.needs_filter {
-            app.apply_filter();
-            app.needs_filter = false;
-        }
+	// Main event loop
+	loop {
+		if app.terminal_needs_clear {
+			let _ = terminal.clear();
+			app.terminal_needs_clear = false;
+		}
 
-        terminal.draw(|f| ui::render(f, &mut app))?;
+		if app.needs_filter {
+			app.apply_filter();
+			app.needs_filter = false;
+		}
 
-        if let Some(event) = rx.recv().await {
-            match event {
-                AppEvent::Tick => {
-                    if app.is_loading {
-                        app.spinner_tick += 1;
-                    }
-                    app.check_msg_expiry();
+		terminal.draw(|f| ui::render(f, &mut app))?;
 
-                    // Check if we need to fetch details for selected AUR package
-                    if !app.view.is_empty() && app.cursor < app.view.len() {
-                        let idx = app.view[app.cursor];
-                        if idx < app.pkgs.len()
-                            && config::cfg().aur && app.pkgs[idx].repo == "aur" && app.pkgs[idx].desc == "AUR Package"
-                                && app.last_cursor_change.elapsed() > Duration::from_millis(300) {
-                                    let name = app.pkgs[idx].name.clone();
-                                    // Mark as fetching so we don't spawn multiple tasks
-                                    app.pkgs[idx].desc = "Fetching details...".to_string();
-                                    handlers::trigger_aur_details_fetch(name, tx.clone());
-                                }
-                    }
-                }
-                AppEvent::Key(key) => {
-                    if handle_key(key, &mut app, &tx) {
-                        break; // Exit loop
-                    }
-                }
-                AppEvent::DbLoaded(pkgs) => {
-                    app.pkgs = pkgs;
-                    app.needs_filter = true;
-                }
-                AppEvent::AurLoaded(aur) => {
-                    let known: std::collections::HashSet<String> = app.pkgs.iter().map(|p| p.name.clone()).collect();
-                    for a in aur {
-                        if !known.contains(&a.name) {
-                            app.pkgs.push(a);
-                        }
-                    }
-                    app.is_loading = false;
-                    let count = app.pkgs.len();
-                    app.set_msg(&format!("Loaded {} packages.", count), 4, false);
-                    app.needs_filter = true;
-                }
-                AppEvent::Message(msg, secs, keep) => {
-                    app.set_msg(&msg, secs, keep);
-                }
-                AppEvent::LoadingDone => {
-                    app.is_loading = false;
-                }
-                AppEvent::ConsoleChunk(chunk) => {
-                    app.write_console_chunk(&chunk);
-                }
-                AppEvent::ConsoleFinished(success) => {
-                    app.console_finished = Some(success);
-                    app.is_loading = false;
-                    if success {
-                        trigger_db_reload(tx.clone());
-                    }
-                }
-                AppEvent::Resize => {
-                    let _ = terminal.clear();
-                }
-                AppEvent::AurDetailsLoaded(fetched) => {
-                    if let Some(idx) = app.pkgs.iter().position(|p| p.name == fetched.name) {
-                        let installed = app.pkgs[idx].installed;
-                        let upgradable = app.pkgs[idx].upgradable;
-                        app.pkgs[idx] = fetched;
-                        app.pkgs[idx].installed = installed;
-                        app.pkgs[idx].upgradable = upgradable;
-                        app.pkgs[idx].repo = "aur".to_string();
-                    }
-                }
-            }
-        }
-    }
+		if let Some(event) = rx.recv().await {
+			match event {
+				AppEvent::Tick => {
+					if app.is_loading {
+						app.spinner_tick += 1;
+					}
+					app.check_msg_expiry();
 
-    // Gracefully restore terminal settings
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+					// Check if we need to fetch details for selected AUR package
+					if !app.view.is_empty() && app.cursor < app.view.len() {
+						let idx = app.view[app.cursor];
+						if idx < app.pkgs.len()
+							&& config::cfg().aur && app.pkgs[idx].repo
+							== "aur" && app.pkgs[idx].desc == "AUR Package"
+							&& app.last_cursor_change.elapsed()
+								> Duration::from_millis(300)
+						{
+							let name = app.pkgs[idx].name.clone();
+							// Mark as fetching so we don't spawn multiple tasks
+							app.pkgs[idx].desc =
+								"Fetching details...".to_string();
+							handlers::trigger_aur_details_fetch(
+								name,
+								tx.clone(),
+							);
+						}
+					}
+				}
+				AppEvent::Key(key) => {
+					if handle_key(key, &mut app, &tx) {
+						break; // Exit loop
+					}
+				}
+				AppEvent::DbLoaded(pkgs) => {
+					app.pkgs = pkgs;
+					app.needs_filter = true;
+				}
+				AppEvent::AurLoaded(aur) => {
+					let known: std::collections::HashSet<String> =
+						app.pkgs.iter().map(|p| p.name.clone()).collect();
+					for a in aur {
+						if !known.contains(&a.name) {
+							app.pkgs.push(a);
+						}
+					}
+					app.is_loading = false;
+					let count = app.pkgs.len();
+					app.set_msg(
+						&format!("Loaded {} packages.", count),
+						4,
+						false,
+					);
+					app.needs_filter = true;
+				}
+				AppEvent::Message(msg, secs, keep) => {
+					app.set_msg(&msg, secs, keep);
+				}
+				AppEvent::LoadingDone => {
+					app.is_loading = false;
+				}
+				AppEvent::ConsoleChunk(chunk) => {
+					app.write_console_chunk(&chunk);
+				}
+				AppEvent::ConsoleFinished(success) => {
+					app.console_finished = Some(success);
+					app.is_loading = false;
+					if success {
+						trigger_db_reload(tx.clone());
+					}
+				}
+				AppEvent::Resize => {
+					let _ = terminal.clear();
+				}
+				AppEvent::AurDetailsLoaded(fetched) => {
+					if let Some(idx) =
+						app.pkgs.iter().position(|p| p.name == fetched.name)
+					{
+						let installed = app.pkgs[idx].installed;
+						let upgradable = app.pkgs[idx].upgradable;
+						app.pkgs[idx] = fetched;
+						app.pkgs[idx].installed = installed;
+						app.pkgs[idx].upgradable = upgradable;
+						app.pkgs[idx].repo = "aur".to_string();
+					}
+				}
+			}
+		}
+	}
 
-    Ok(())
+	// Gracefully restore terminal settings
+	disable_raw_mode()?;
+	execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+	terminal.show_cursor()?;
+
+	Ok(())
 }
