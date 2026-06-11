@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub fn is_sudo_cached() -> bool {
     Command::new("sudo")
-        .args(&["-n", "true"])
+        .args(["-n", "true"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -26,7 +26,7 @@ pub fn trigger_action_in_tui(
 
         if let Some(pwd) = password {
             let mut child = match tokio::process::Command::new("sudo")
-                .args(&["-S", "-v"])
+                .args(["-S", "-v"])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
@@ -62,30 +62,30 @@ pub fn trigger_action_in_tui(
             ConfirmAction::Install => {
                 if helper == "pacman" {
                     let mut c = tokio::process::Command::new("sudo");
-                    c.args(&["pacman", "--noconfirm", "-S"]);
+                    c.args(["pacman", "--noconfirm", "-S"]);
                     c.args(name_refs);
                     c
                 } else {
                     let mut c = tokio::process::Command::new(helper);
-                    c.args(&["--noconfirm", "-S"]);
+                    c.args(["--noconfirm", "-S"]);
                     c.args(name_refs);
                     c
                 }
             }
             ConfirmAction::Remove => {
                 let mut c = tokio::process::Command::new("sudo");
-                c.args(&["pacman", "--noconfirm", "-Rns"]);
+                c.args(["pacman", "--noconfirm", "-Rns"]);
                 c.args(name_refs);
                 c
             }
             ConfirmAction::Update => {
                 if helper == "pacman" {
                     let mut c = tokio::process::Command::new("sudo");
-                    c.args(&["pacman", "--noconfirm", "-Syu"]);
+                    c.args(["pacman", "--noconfirm", "-Syu"]);
                     c
                 } else {
                     let mut c = tokio::process::Command::new(helper);
-                    c.args(&["--noconfirm", "-Syu"]);
+                    c.args(["--noconfirm", "-Syu"]);
                     c
                 }
             }
@@ -171,12 +171,12 @@ pub fn trigger_aur_details_fetch(name: String, tx: mpsc::UnboundedSender<AppEven
         let Some(helper) = crate::config::aur_helper() else { return };
 
         let output = tokio::process::Command::new(helper)
-            .args(&["-Si", &name])
+            .args(["-Si", &name])
             .output()
             .await;
             
-        if let Ok(out) = output {
-            if out.status.success() {
+        if let Ok(out) = output
+            && out.status.success() {
                 let stdout_str = String::from_utf8_lossy(&out.stdout);
                 let mut cur = std::collections::HashMap::new();
                 for line in stdout_str.lines() {
@@ -186,13 +186,11 @@ pub fn trigger_aur_details_fetch(name: String, tx: mpsc::UnboundedSender<AppEven
                         cur.insert(k.trim().to_string(), v.trim().to_string());
                     }
                 }
-                if !cur.is_empty() {
-                    if let Some(pkg) = crate::app::map_pkg(&cur, &std::collections::HashSet::new(), &std::collections::HashSet::new()) {
+                if !cur.is_empty()
+                    && let Some(pkg) = crate::app::map_pkg(&cur, &std::collections::HashSet::new(), &std::collections::HashSet::new()) {
                         let _ = tx.send(AppEvent::AurDetailsLoaded(pkg));
                     }
-                }
             }
-        }
     });
 }
 
@@ -251,7 +249,7 @@ pub fn trigger_aur_search(query: String, tx: mpsc::UnboundedSender<AppEvent>) {
         };
 
         let output = tokio::process::Command::new(helper)
-            .args(&["-Ss", "--aur", &query])
+            .args(["-Ss", "--aur", &query])
             .output()
             .await;
             
@@ -530,24 +528,22 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 
     let list_height = 20;
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.cursor > 0 {
+        KeyCode::Up | KeyCode::Char('k')
+            if app.cursor > 0 => {
                 app.cursor -= 1;
                 app.detail_top = 0;
                 if app.cursor < app.list_top {
                     app.list_top = app.cursor;
                 }
             }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if !app.view.is_empty() && app.cursor < app.view.len() - 1 {
+        KeyCode::Down | KeyCode::Char('j')
+            if !app.view.is_empty() && app.cursor < app.view.len() - 1 => {
                 app.cursor += 1;
                 app.detail_top = 0;
                 if app.cursor >= app.list_top + list_height {
                     app.list_top = app.cursor - list_height + 1;
                 }
             }
-        }
         KeyCode::PageUp => {
             app.cursor = app.cursor.saturating_sub(list_height);
             app.detail_top = 0;
@@ -555,23 +551,22 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
                 app.list_top = app.cursor;
             }
         }
-        KeyCode::PageDown => {
-            if !app.view.is_empty() {
+        KeyCode::PageDown
+            if !app.view.is_empty() => {
                 app.cursor = (app.cursor + list_height).min(app.view.len() - 1);
                 app.detail_top = 0;
                 if app.cursor >= app.list_top + list_height {
                     app.list_top = app.cursor - list_height + 1;
                 }
             }
-        }
         KeyCode::Char('K') => {
             app.detail_top = app.detail_top.saturating_sub(1);
         }
         KeyCode::Char('J') => {
             app.detail_top = app.detail_top.saturating_add(1);
         }
-        KeyCode::Char(' ') => {
-            if !app.view.is_empty() && app.cursor < app.view.len() {
+        KeyCode::Char(' ')
+            if !app.view.is_empty() && app.cursor < app.view.len() => {
                 let pkg_name = app.pkgs[app.view[app.cursor]].name.clone();
                 if app.selected.contains(&pkg_name) {
                     app.selected.remove(&pkg_name);
@@ -579,9 +574,8 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
                     app.selected.insert(pkg_name);
                 }
             }
-        }
-        KeyCode::Char('d') => {
-            if !app.view.is_empty() && app.cursor < app.view.len() {
+        KeyCode::Char('d')
+            if !app.view.is_empty() && app.cursor < app.view.len() => {
                 let pkg = &app.pkgs[app.view[app.cursor]];
                 if !pkg.url.is_empty() && pkg.url != "None" {
                     trigger_open_homepage(pkg.url.clone(), tx.clone());
@@ -589,9 +583,8 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
                     app.set_msg("Error: No website URL available.", 3, false);
                 }
             }
-        }
-        KeyCode::Char('i') => {
-            if !app.view.is_empty() && app.cursor < app.view.len() {
+        KeyCode::Char('i')
+            if !app.view.is_empty() && app.cursor < app.view.len() => {
                 let name = app.pkgs[app.view[app.cursor]].name.clone();
                 let names = if app.selected.is_empty() {
                     vec![name]
@@ -600,9 +593,8 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
                 };
                 app.confirm = Some((ConfirmAction::Install, names));
             }
-        }
-        KeyCode::Char('r') => {
-            if !app.view.is_empty() && app.cursor < app.view.len() {
+        KeyCode::Char('r')
+            if !app.view.is_empty() && app.cursor < app.view.len() => {
                 let name = app.pkgs[app.view[app.cursor]].name.clone();
                 let names = if app.selected.is_empty() {
                     vec![name]
@@ -611,7 +603,6 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
                 };
                 app.confirm = Some((ConfirmAction::Remove, names));
             }
-        }
         KeyCode::Char('u') => {
             app.confirm = Some((ConfirmAction::Update, vec![]));
         }
@@ -621,7 +612,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
         KeyCode::Char('/') => {
             app.search_mode = true;
         }
-        KeyCode::Char(c) if c.is_digit(10) => {
+        KeyCode::Char(c) if c.is_ascii_digit() => {
             let idx = (c.to_digit(10).unwrap() as usize).saturating_sub(1);
             if idx < FILTERS.len() {
                 app.filter_idx = idx;

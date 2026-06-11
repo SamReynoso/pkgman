@@ -471,11 +471,11 @@ fn render_detail_info(f: &mut Frame, pkg: &crate::app::Package, area: Rect, scro
         sep,
     )));
     field!(lines, "Repository", pkg.repo, repo_color(&pkg.repo, theme));
-    field!(lines, "Name", pkg.name, val.clone());
+    field!(lines, "Name", pkg.name, val);
     field!(lines, "Version", pkg.version, theme.accent);
-    field!(lines, "Architecture", pkg.arch, val.clone());
+    field!(lines, "Architecture", pkg.arch, val);
     if pkg.groups != "None" && !pkg.groups.is_empty() {
-        field!(lines, "Groups", pkg.groups, val.clone());
+        field!(lines, "Groups", pkg.groups, val);
     }
     lines.push(Line::from(""));
 
@@ -514,13 +514,13 @@ fn render_detail_info(f: &mut Frame, pkg: &crate::app::Package, area: Rect, scro
         sep,
     )));
     if pkg.depends != "None" && !pkg.depends.is_empty() {
-        field!(lines, "Depends On", pkg.depends, val.clone());
+        field!(lines, "Depends On", pkg.depends, val);
     }
     if pkg.optdeps != "None" && !pkg.optdeps.is_empty() {
         field!(lines, "Optional Deps", pkg.optdeps, Style::default().fg(theme.border));
     }
     if pkg.req_by != "None" && !pkg.req_by.is_empty() {
-        field!(lines, "Required By", pkg.req_by, val.clone());
+        field!(lines, "Required By", pkg.req_by, val);
     }
     if pkg.opt_for != "None" && !pkg.opt_for.is_empty() {
         field!(lines, "Optional For", pkg.opt_for, Style::default().fg(theme.border));
@@ -542,19 +542,19 @@ fn render_detail_info(f: &mut Frame, pkg: &crate::app::Package, area: Rect, scro
             sep,
         )));
         if has_provides {
-            field!(lines, "Provides", pkg.provides, val.clone());
+            field!(lines, "Provides", pkg.provides, val);
         }
         if has_conflicts {
             field!(lines, "Conflicts", pkg.conflicts, theme.error);
         }
         if has_replaces {
-            field!(lines, "Replaces", pkg.replaces, val.clone());
+            field!(lines, "Replaces", pkg.replaces, val);
         }
         if has_licenses {
             field!(lines, "Licenses", pkg.licenses, Style::default().fg(theme.border));
         }
         if has_build_date {
-            field!(lines, "Build Date", pkg.build_date, val.clone());
+            field!(lines, "Build Date", pkg.build_date, val);
         }
         if has_url {
             field!(lines, "URL", pkg.url, theme.accent);

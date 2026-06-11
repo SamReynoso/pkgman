@@ -45,8 +45,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tx_key = tx.clone();
     tokio::spawn(async move {
         loop {
-            if ct_event::poll(Duration::from_millis(10)).unwrap_or(false) {
-                if let Ok(ev) = ct_event::read() {
+            if ct_event::poll(Duration::from_millis(10)).unwrap_or(false)
+                && let Ok(ev) = ct_event::read() {
                     match ev {
                         CrosstermEvent::Key(key) => {
                             let _ = tx_key.send(AppEvent::Key(key));
@@ -57,7 +57,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         _ => {}
                     }
                 }
-            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     });
@@ -106,16 +105,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     // Check if we need to fetch details for selected AUR package
                     if !app.view.is_empty() && app.cursor < app.view.len() {
                         let idx = app.view[app.cursor];
-                        if idx < app.pkgs.len() {
-                            if config::cfg().aur && app.pkgs[idx].repo == "aur" && app.pkgs[idx].desc == "AUR Package" {
-                                if app.last_cursor_change.elapsed() > Duration::from_millis(300) {
+                        if idx < app.pkgs.len()
+                            && config::cfg().aur && app.pkgs[idx].repo == "aur" && app.pkgs[idx].desc == "AUR Package"
+                                && app.last_cursor_change.elapsed() > Duration::from_millis(300) {
                                     let name = app.pkgs[idx].name.clone();
                                     // Mark as fetching so we don't spawn multiple tasks
                                     app.pkgs[idx].desc = "Fetching details...".to_string();
                                     handlers::trigger_aur_details_fetch(name, tx.clone());
                                 }
-                            }
-                        }
                     }
                 }
                 AppEvent::Key(key) => {

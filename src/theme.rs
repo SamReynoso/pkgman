@@ -99,15 +99,14 @@ pub fn string_to_color(s: &str) -> Color {
 
     // Try hex first: #RRGGBB or RRGGBB
     let hex = s.strip_prefix('#').unwrap_or(s);
-    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        if let (Ok(r), Ok(g), Ok(b)) = (
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit())
+        && let (Ok(r), Ok(g), Ok(b)) = (
             u8::from_str_radix(&hex[0..2], 16),
             u8::from_str_radix(&hex[2..4], 16),
             u8::from_str_radix(&hex[4..6], 16),
         ) {
             return Color::Rgb(r, g, b);
         }
-    }
 
     match s.to_lowercase().as_str() {
         "reset" => Color::Reset,

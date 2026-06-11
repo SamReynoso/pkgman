@@ -47,11 +47,10 @@ fn load() -> Config {
     let path = config_path();
 
     // Existing file is the source of truth: manual on/off is always respected.
-    if let Some(p) = &path {
-        if let Ok(text) = std::fs::read_to_string(p) {
+    if let Some(p) = &path
+        && let Ok(text) = std::fs::read_to_string(p) {
             return parse(&text);
         }
-    }
 
     // First run: seed a config. AUR on only if a helper is actually installed.
     let aur = installed_helper().is_some();

@@ -156,14 +156,12 @@ impl App {
     }
 
     pub fn check_msg_expiry(&mut self) {
-        if !self.msg_keep {
-            if let Some(expiry) = self.msg_expires {
-                if Instant::now() > expiry {
+        if !self.msg_keep
+            && let Some(expiry) = self.msg_expires
+                && Instant::now() > expiry {
                     self.msg.clear();
                     self.msg_expires = None;
                 }
-            }
-        }
     }
 
     pub fn apply_filter(&mut self) {
@@ -273,7 +271,7 @@ impl App {
 }
 
 pub fn parse_size(s: &str) -> f64 {
-    let parts: Vec<&str> = s.trim().split_whitespace().collect();
+    let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() < 2 {
         return 0.0;
     }
@@ -375,11 +373,10 @@ pub fn load_packages_sync() -> Vec<Package> {
             cur.insert(k.trim().to_string(), v.trim().to_string());
         }
     }
-    if !cur.is_empty() {
-        if let Some(pkg) = map_pkg(&cur, &installed, &updates) {
+    if !cur.is_empty()
+        && let Some(pkg) = map_pkg(&cur, &installed, &updates) {
             pkgs.push(pkg);
         }
-    }
     
     // Append installed foreign/AUR packages if they are not already in sync list
     let known_names: HashSet<String> = pkgs.iter().map(|p| p.name.clone()).collect();
@@ -470,47 +467,44 @@ pub fn load_aur_sync() -> Vec<Package> {
         ];
         
         for path in paths {
-            if path.exists() {
-                if let Ok(file) = File::open(&path) {
+            if path.exists()
+                && let Ok(file) = File::open(&path) {
                     let reader = BufReader::new(file);
-                    for line in reader.lines() {
-                        if let Ok(l) = line {
-                            let parts: Vec<&str> = l.split_whitespace().collect();
-                            if parts.len() >= 2 && parts[1].to_uppercase() == "AUR" {
-                                let name = parts[0].to_string();
-                                let search_key = format!("{} aur package", name).to_lowercase();
-                                pkgs.push(Package {
-                                    name,
-                                    version: "unknown".to_string(),
-                                    repo: "aur".to_string(),
-                                    desc: "AUR Package".to_string(),
-                                    arch: "any".to_string(),
-                                    url: "None".to_string(),
-                                    licenses: "None".to_string(),
-                                    groups: "None".to_string(),
-                                    provides: "None".to_string(),
-                                    depends: "None".to_string(),
-                                    optdeps: "None".to_string(),
-                                    req_by: "None".to_string(),
-                                    opt_for: "None".to_string(),
-                                    conflicts: "None".to_string(),
-                                    replaces: "None".to_string(),
-                                    dl_size: "None".to_string(),
-                                    inst_size: "None".to_string(),
-                                    packager: "AUR".to_string(),
-                                    build_date: "None".to_string(),
-                                    installed: false,
-                                    upgradable: false,
-                                    search_key,
-                                });
-                            }
+                    for l in reader.lines().flatten() {
+                        let parts: Vec<&str> = l.split_whitespace().collect();
+                        if parts.len() >= 2 && parts[1].to_uppercase() == "AUR" {
+                            let name = parts[0].to_string();
+                            let search_key = format!("{} aur package", name).to_lowercase();
+                            pkgs.push(Package {
+                                name,
+                                version: "unknown".to_string(),
+                                repo: "aur".to_string(),
+                                desc: "AUR Package".to_string(),
+                                arch: "any".to_string(),
+                                url: "None".to_string(),
+                                licenses: "None".to_string(),
+                                groups: "None".to_string(),
+                                provides: "None".to_string(),
+                                depends: "None".to_string(),
+                                optdeps: "None".to_string(),
+                                req_by: "None".to_string(),
+                                opt_for: "None".to_string(),
+                                conflicts: "None".to_string(),
+                                replaces: "None".to_string(),
+                                dl_size: "None".to_string(),
+                                inst_size: "None".to_string(),
+                                packager: "AUR".to_string(),
+                                build_date: "None".to_string(),
+                                installed: false,
+                                upgradable: false,
+                                search_key,
+                            });
                         }
                     }
                     if !pkgs.is_empty() {
                         return pkgs; // Successfully loaded from cache!
                     }
                 }
-            }
         }
     }
 
@@ -529,7 +523,7 @@ pub fn load_aur_sync() -> Vec<Package> {
     };
     
     let output = Command::new(helper)
-        .args(&["-Sl", "aur"])
+        .args(["-Sl", "aur"])
         .output()
         .ok();
     
