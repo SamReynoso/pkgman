@@ -252,6 +252,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 						}
 						app.update_installed_cache();
 					}
+					AppEvent::AurDetailsFailed(name) => {
+						if let Some(pkg) =
+							app.pkgs.iter_mut().find(|p| p.name == name)
+							&& pkg.desc == "Fetching details..."
+						{
+							// Distinct from "AUR Package" so the Tick
+							// handler doesn't refetch in a loop
+							pkg.desc =
+								"AUR package (details unavailable)"
+									.to_string();
+						}
+					}
 					AppEvent::DepTreeLoaded(pkg_name, res) => {
 						// Always clear: result may be for a stale selection,
 						// leaving the flag set blocks any future fetch

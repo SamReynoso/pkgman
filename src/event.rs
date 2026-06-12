@@ -10,6 +10,7 @@ pub enum AppEvent {
 	LoadingDone, // clear the loading spinner without altering the status message
 	Resize,
 	AurDetailsLoaded(Box<crate::app::Package>),
+	AurDetailsFailed(String), // reset the fetching marker so the row isn't stuck
 	DepTreeLoaded(String, Result<Vec<String>, String>),
 	WikiLoaded(String, Result<Vec<String>, String>),
 }

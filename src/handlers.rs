@@ -42,6 +42,7 @@ fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
 /// Names pacman knows from sync repos; the rest are AUR-only.
 async fn pacman_known(names: &[&str]) -> std::collections::HashSet<String> {
 	let output = tokio::process::Command::new("pacman")
+		.env("LC_ALL", "C")
 		.arg("-Si")
 		.args(names)
 		.output()
@@ -248,43 +249,54 @@ pub fn trigger_action_in_tui(
 	});
 }
 
+/// Helper invocation printing pacman -Si style 'Key : Value' package info.
+fn aur_info_args<'a>(helper: &str, name: &'a str) -> Vec<&'a str> {
+	if helper == "grimaur" {
+		vec!["--no-color", "inspect", "--plain", "--full", name]
+	} else {
+		vec!["-Si", name]
+	}
+}
+
 pub fn trigger_aur_details_fetch(name: String, tx: mpsc::UnboundedSender<AppEvent>) {
 	tokio::spawn(async move {
-		let Some(helper) = crate::config::aur_helper() else {
-			return;
-		};
+		let mut sent = false;
+		if let Some(helper) = crate::config::aur_helper() {
+			let output = tokio::process::Command::new(helper)
+				.env("LC_ALL", "C")
+				.args(aur_info_args(helper, &name))
+				.output()
+				.await;
 
-		// grimaur --plain prints pacman -Si style 'Key : Value' output
-		let args: Vec<&str> = if helper == "grimaur" {
-			vec!["--no-color", "inspect", "--plain", "--full", &name]
-		} else {
-			vec!["-Si", &name]
-		};
-		let output = tokio::process::Command::new(helper)
-			.args(&args)
-			.output()
-			.await;
-
-		if let Ok(out) = output
-			&& out.status.success()
-		{
-			let stdout_str = String::from_utf8_lossy(&out.stdout);
-			let mut cur = std::collections::HashMap::new();
-			for line in stdout_str.lines() {
-				if let Some(pos) = line.find(" : ") {
-					let k = &line[..pos];
-					let v = &line[pos + 3..];
-					cur.insert(k.trim().to_string(), v.trim().to_string());
+			if let Ok(out) = output
+				&& out.status.success()
+			{
+				let stdout_str = String::from_utf8_lossy(&out.stdout);
+				let mut cur = std::collections::HashMap::new();
+				for line in stdout_str.lines() {
+					if let Some(pos) = line.find(" : ") {
+						let k = &line[..pos];
+						let v = &line[pos + 3..];
+						cur.insert(
+							k.trim().to_string(),
+							v.trim().to_string(),
+						);
+					}
+				}
+				if !cur.is_empty()
+					&& let Some(pkg) = crate::app::map_pkg(
+						&cur,
+						&std::collections::HashSet::new(),
+						&std::collections::HashSet::new(),
+					) {
+					let _ = tx.send(AppEvent::AurDetailsLoaded(Box::new(pkg)));
+					sent = true;
 				}
 			}
-			if !cur.is_empty()
-				&& let Some(pkg) = crate::app::map_pkg(
-					&cur,
-					&std::collections::HashSet::new(),
-					&std::collections::HashSet::new(),
-				) {
-				let _ = tx.send(AppEvent::AurDetailsLoaded(Box::new(pkg)));
-			}
+		}
+		// Failure must report back, else the row is stuck on "Fetching details..."
+		if !sent {
+			let _ = tx.send(AppEvent::AurDetailsFailed(name));
 		}
 	});
 }
@@ -342,9 +354,59 @@ pub fn trigger_open_homepage(url: String, tx: mpsc::UnboundedSender<AppEvent>) {
 	});
 }
 
+/// Flat one-level dep list from AUR helper metadata, for packages pactree
+/// can't resolve (AUR packages absent from the sync databases).
+async fn aur_dep_fallback(name: &str) -> Option<Vec<String>> {
+	let helper = crate::config::aur_helper()?;
+	let out = tokio::process::Command::new(helper)
+		.env("LC_ALL", "C")
+		.args(aur_info_args(helper, name))
+		.output()
+		.await
+		.ok()?;
+	if !out.status.success() {
+		return None;
+	}
+
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	let mut deps: Vec<(String, &'static str)> = Vec::new();
+	for line in stdout.lines() {
+		let Some(pos) = line.find(" : ") else {
+			continue;
+		};
+		let tag = match line[..pos].trim() {
+			"Depends On" => "",
+			"Make Deps" | "Make Depends" => " (make)",
+			"Check Deps" | "Check Depends" => " (check)",
+			"Optional Deps" => " (optional)",
+			_ => continue,
+		};
+		let val = line[pos + 3..].trim();
+		if val == "None" || val.is_empty() {
+			continue;
+		}
+		for d in val.split("  ").map(str::trim).filter(|d| !d.is_empty()) {
+			deps.push((d.to_string(), tag));
+		}
+	}
+
+	let mut lines = vec![format!("{} (AUR metadata, direct deps only)", name)];
+	if deps.is_empty() {
+		lines.push("└─ (no dependencies)".to_string());
+	} else {
+		let last = deps.len() - 1;
+		for (i, (d, tag)) in deps.into_iter().enumerate() {
+			let branch = if i == last { "└─" } else { "├─" };
+			lines.push(format!("{} {}{}", branch, d, tag));
+		}
+	}
+	Some(lines)
+}
+
 pub fn trigger_dep_tree_fetch(name: String, installed: bool, tx: mpsc::UnboundedSender<AppEvent>) {
 	tokio::spawn(async move {
 		let mut cmd = tokio::process::Command::new("pactree");
+		cmd.env("LC_ALL", "C");
 		cmd.arg("-a");
 		if !installed {
 			cmd.arg("-s");
@@ -360,9 +422,16 @@ pub fn trigger_dep_tree_fetch(name: String, installed: bool, tx: mpsc::Unbounded
 				let _ = tx.send(AppEvent::DepTreeLoaded(name, Ok(tree)));
 			}
 			Ok(out) => {
-				let err_msg =
-					String::from_utf8_lossy(&out.stderr).trim().to_string();
-				let _ = tx.send(AppEvent::DepTreeLoaded(name, Err(err_msg)));
+				// Not in the sync DBs: likely AUR, try helper metadata
+				if let Some(tree) = aur_dep_fallback(&name).await {
+					let _ = tx.send(AppEvent::DepTreeLoaded(name, Ok(tree)));
+				} else {
+					let err_msg = String::from_utf8_lossy(&out.stderr)
+						.trim()
+						.to_string();
+					let _ = tx
+						.send(AppEvent::DepTreeLoaded(name, Err(err_msg)));
+				}
 			}
 			Err(e) => {
 				let _ = tx.send(AppEvent::DepTreeLoaded(name, Err(e.to_string())));
@@ -399,6 +468,7 @@ pub fn trigger_aur_search(query: String, tx: mpsc::UnboundedSender<AppEvent>) {
 			vec!["-Ss", "--aur", &query]
 		};
 		let output = tokio::process::Command::new(helper)
+			.env("LC_ALL", "C")
 			.args(&args)
 			.output()
 			.await;
@@ -530,6 +600,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 				app.theme_builder_open = false;
 				let _ = crate::config::save_config(
 					crate::config::cfg().aur,
+					&crate::config::cfg().helper,
 					&app.theme,
 				);
 			}

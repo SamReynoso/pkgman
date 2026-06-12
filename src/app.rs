@@ -335,12 +335,20 @@ pub fn get_disk_free() -> String {
 pub fn load_packages_sync() -> Vec<Package> {
 	let helper = crate::config::aur_helper();
 
-	let output = Command::new("pacman").arg("-Si").output().ok();
+	let output = Command::new("pacman")
+		.env("LC_ALL", "C")
+		.arg("-Si")
+		.output()
+		.ok();
 	let raw = output
 		.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 		.unwrap_or_default();
 
-	let q_out = Command::new("pacman").arg("-Qq").output().ok();
+	let q_out = Command::new("pacman")
+		.env("LC_ALL", "C")
+		.arg("-Qq")
+		.output()
+		.ok();
 	let installed: HashSet<String> = q_out
 		.map(|o| {
 			String::from_utf8_lossy(&o.stdout)
@@ -353,9 +361,13 @@ pub fn load_packages_sync() -> Vec<Package> {
 
 	// Fetch updates via AUR helper if available (includes both pacman and AUR updates)
 	let u_out = if let Some(h) = helper {
-		Command::new(h).arg("-Qu").output().ok()
+		Command::new(h).env("LC_ALL", "C").arg("-Qu").output().ok()
 	} else {
-		Command::new("pacman").arg("-Qu").output().ok()
+		Command::new("pacman")
+			.env("LC_ALL", "C")
+			.arg("-Qu")
+			.output()
+			.ok()
 	};
 	let updates: HashSet<String> = u_out
 		.map(|o| {
@@ -367,7 +379,11 @@ pub fn load_packages_sync() -> Vec<Package> {
 		.unwrap_or_default();
 
 	// Query installed foreign/AUR packages
-	let qm_out = Command::new("pacman").arg("-Qm").output().ok();
+	let qm_out = Command::new("pacman")
+		.env("LC_ALL", "C")
+		.arg("-Qm")
+		.output()
+		.ok();
 	let foreign: HashMap<String, String> = qm_out
 		.map(|o| {
 			String::from_utf8_lossy(&o.stdout)
@@ -567,7 +583,11 @@ pub fn load_aur_sync() -> Vec<Package> {
 		None => return Vec::new(),
 	};
 
-	let output = Command::new(helper).args(["-Sl", "aur"]).output().ok();
+	let output = Command::new(helper)
+		.env("LC_ALL", "C")
+		.args(["-Sl", "aur"])
+		.output()
+		.ok();
 
 	let out = output
 		.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

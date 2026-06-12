@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 pub struct Config {
 	/// Enable AUR features: helper search/install, AUR DB load, foreign-pkg detail fetch.
 	pub aur: bool,
+	/// AUR helper preference: "auto" or one of HELPERS. Ignored when not installed.
+	pub helper: String,
 	pub theme_name: String,
 	pub theme_bg: String,
 	pub theme_fg: String,
@@ -22,6 +24,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			aur: true,
+			helper: "auto".to_string(),
 			theme_name: "default".to_string(),
 			theme_bg: "reset".to_string(),
 			theme_fg: "white".to_string(),
@@ -60,7 +63,7 @@ fn load() -> Config {
 		..Default::default()
 	};
 	if path.is_some() {
-		let _ = save_config(aur, &crate::theme::THEME_DEFAULT);
+		let _ = save_config(aur, "auto", &crate::theme::THEME_DEFAULT);
 	}
 	c
 }
@@ -78,6 +81,7 @@ fn parse(text: &str) -> Config {
 		let clean_val = v.trim().trim_matches('"').to_string();
 		match k.trim() {
 			"aur" => c.aur = parse_bool(&clean_val).unwrap_or(c.aur),
+			"helper" => c.helper = clean_val.to_lowercase(),
 			"theme" => c.theme_name = clean_val,
 			"theme_bg" => c.theme_bg = clean_val,
 			"theme_fg" => c.theme_fg = clean_val,
@@ -95,15 +99,16 @@ fn parse(text: &str) -> Config {
 	c
 }
 
-pub fn save_config(aur: bool, theme: &crate::theme::Theme) -> std::io::Result<()> {
+pub fn save_config(aur: bool, helper: &str, theme: &crate::theme::Theme) -> std::io::Result<()> {
 	let Some(path) = config_path() else {
 		return Ok(());
 	};
 	if let Some(dir) = path.parent() {
 		std::fs::create_dir_all(dir)?;
 	}
-	let values: [(&str, String); 12] = [
+	let values: [(&str, String); 13] = [
 		("aur", aur.to_string()),
+		("helper", format!("\"{}\"", helper)),
 		("theme", format!("\"{}\"", theme.name)),
 		(
 			"theme_bg",
@@ -152,10 +157,11 @@ pub fn save_config(aur: bool, theme: &crate::theme::Theme) -> std::io::Result<()
 		Err(_) => {
 			let mut body = String::from(
 				"# pkgman configuration\n\
-                 # aur: enable AUR helper (yay/paru/grimaur) features. Set false for pacman-only.\n",
+                 # aur: enable AUR helper (yay/paru/grimaur) features. Set false for pacman-only.\n\
+                 # helper: which AUR helper to use: auto, paru, yay, or grimaur.\n",
 			);
 			for (i, (k, v)) in values.iter().enumerate() {
-				if i == 1 {
+				if i == 2 {
 					body.push_str("\n# Theme Settings\n");
 				}
 				body.push_str(&format!("{} = {}\n", k, v));
@@ -222,14 +228,24 @@ fn which(cmd: &str) -> bool {
 		.unwrap_or(false)
 }
 
+const HELPERS: [&str; 3] = ["paru", "yay", "grimaur"];
+
 fn installed_helper() -> Option<&'static str> {
-	["paru", "yay", "grimaur"].into_iter().find(|h| which(h))
+	HELPERS.into_iter().find(|h| which(h))
 }
 
 /// AUR helper to use, or None when AUR is disabled or no helper is installed.
+/// A configured `helper` wins when it names a known, installed helper;
+/// otherwise fall back to detection order.
 pub fn aur_helper() -> Option<&'static str> {
 	if !cfg().aur {
 		return None;
+	}
+	let pref = cfg().helper.as_str();
+	if let Some(h) = HELPERS.into_iter().find(|h| *h == pref)
+		&& which(h)
+	{
+		return Some(h);
 	}
 	installed_helper()
 }
