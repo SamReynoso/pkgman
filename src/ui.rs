@@ -19,6 +19,7 @@ const HELP_LINES: &[(&str, &str)] = &[
 	("J / K", "Scroll details / tree"),
 	("Ctrl+j / Ctrl+k", "Scroll details / tree"),
 	("Ctrl+↑ / Ctrl+↓", "Scroll details / tree"),
+	("Ctrl+PgUp / Ctrl+PgDn", "Scroll details / tree full page"),
 	("Home / End", "Jump to top / bottom"),
 	("", ""),
 	("TABS & SEARCH", ""),
@@ -74,7 +75,7 @@ fn status_icon(installed: bool, upgradable: bool, theme: &crate::theme::Theme) -
 // ── main render ─────────────────────────────────────────────────────
 
 pub fn render(f: &mut Frame, app: &mut App) {
-	let size = f.size();
+	let size = f.area();
 
 	let outer = Layout::default()
 		.direction(Direction::Vertical)
@@ -99,9 +100,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
 	}
 	if let Some((action, names)) = &app.confirm {
 		render_confirm_overlay(f, size, action, names);
-	}
-	if app.sudo_password_mode {
-		render_sudo_password_overlay(f, size, &app.sudo_password);
 	}
 	if app.console_mode {
 		render_console_overlay(f, size, app);
@@ -1155,49 +1153,34 @@ fn truncate_str(s: &str, max: usize) -> String {
 	}
 }
 
-fn render_sudo_password_overlay(f: &mut Frame, area: Rect, password: &str) {
-	let popup = centered_rect(50, 20, area);
-	f.render_widget(Clear, popup);
-
-	let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-	let masked_password = "*".repeat(password.len());
-
-	let lines = vec![
-		Line::from(Span::styled(
-			" SUDO PASSWORD REQUIRED ",
-			Style::default()
-				.fg(Color::Black)
-				.bg(Color::Yellow)
-				.add_modifier(Modifier::BOLD),
-		)),
-		Line::from(""),
-		Line::from(vec![
-			Span::styled(
-				format!("[sudo] password for {}: ", user),
-				Style::default().fg(Color::White),
-			),
-			Span::styled(masked_password, Style::default().fg(Color::Cyan)),
-			Span::styled("█", Style::default().fg(Color::Cyan)),
-		]),
-		Line::from(""),
-		Line::from(Span::styled(
-			"  [Enter] Submit    [Esc] Cancel",
-			Style::default().fg(Color::DarkGray),
-		)),
-	];
-
-	f.render_widget(
-		Paragraph::new(lines)
-			.block(Block::default()
-				.borders(Borders::ALL)
-				.border_style(Style::default().fg(Color::Yellow)))
-			.style(Style::default().bg(Color::Black))
-			.alignment(Alignment::Center),
-		popup,
-	);
+fn vt_color(c: vt100::Color, default: Color) -> Color {
+	match c {
+		vt100::Color::Default => default,
+		vt100::Color::Idx(i) => Color::Indexed(i),
+		vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+	}
 }
 
-fn render_console_overlay(f: &mut Frame, area: Rect, app: &App) {
+fn console_cell_style(cell: &vt100::Cell) -> Style {
+	let mut style = Style::default()
+		.fg(vt_color(cell.fgcolor(), Color::White))
+		.bg(vt_color(cell.bgcolor(), Color::Black));
+	if cell.bold() {
+		style = style.add_modifier(Modifier::BOLD);
+	}
+	if cell.italic() {
+		style = style.add_modifier(Modifier::ITALIC);
+	}
+	if cell.underline() {
+		style = style.add_modifier(Modifier::UNDERLINED);
+	}
+	if cell.inverse() {
+		style = style.add_modifier(Modifier::REVERSED);
+	}
+	style
+}
+
+fn render_console_overlay(f: &mut Frame, area: Rect, app: &mut App) {
 	let popup = centered_rect(85, 85, area);
 	f.render_widget(Clear, popup);
 
@@ -1209,31 +1192,46 @@ fn render_console_overlay(f: &mut Frame, area: Rect, app: &App) {
 
 	let border_style = Style::default().fg(border_color);
 
-	let mut lines = Vec::new();
-	for l in &app.console_lines {
-		lines.push(Line::from(Span::styled(
-			l,
-			Style::default().fg(Color::White),
-		)));
-	}
-	if !app.current_line.is_empty() {
-		lines.push(Line::from(Span::styled(
-			&app.current_line,
-			Style::default().fg(Color::White),
-		)));
-	}
-
-	let inner_height = popup.height.saturating_sub(2) as usize;
-	let max_lines = lines.len();
-	let scroll_offset = if app.console_finished.is_none() {
-		max_lines.saturating_sub(inner_height)
+	// Scrollback only once finished; live output stays pinned to the screen
+	let scrollback = if app.console_finished.is_none() {
+		0
 	} else {
 		app.console_scroll
-			.min(max_lines.saturating_sub(inner_height))
 	};
+	let mut lines = Vec::new();
+	if let Some(term) = app.console_term.as_mut() {
+		term.screen_mut().set_scrollback(scrollback);
+		let screen = term.screen();
+		let (rows, cols) = screen.size();
+		for row in 0..rows {
+			let mut spans: Vec<Span> = Vec::new();
+			let mut run = String::new();
+			let mut run_style = Style::default();
+			for col in 0..cols {
+				let Some(cell) = screen.cell(row, col) else {
+					continue;
+				};
+				let style = console_cell_style(cell);
+				let txt = cell.contents();
+				let txt = if txt.is_empty() { " " } else { txt };
+				if style != run_style && !run.is_empty() {
+					spans.push(Span::styled(
+						std::mem::take(&mut run),
+						run_style,
+					));
+				}
+				run_style = style;
+				run.push_str(txt);
+			}
+			if !run.is_empty() {
+				spans.push(Span::styled(run, run_style));
+			}
+			lines.push(Line::from(spans));
+		}
+	}
 
 	let footer_text = match app.console_finished {
-		None => " Running... Please wait ",
+		None => " Running... keys go to the process (Ctrl+C aborts) ",
 		Some(true) => " Finished. Press [Esc] or [Enter] to return ",
 		Some(false) => " Failed. Press [Esc] or [Enter] to return ",
 	};
@@ -1254,8 +1252,7 @@ fn render_console_overlay(f: &mut Frame, area: Rect, app: &App) {
 			)))
 			.borders(Borders::ALL)
 			.border_style(border_style))
-		.style(Style::default().bg(Color::Black))
-		.scroll((scroll_offset as u16, 0));
+		.style(Style::default().bg(Color::Black));
 
 	f.render_widget(paragraph, popup);
 }

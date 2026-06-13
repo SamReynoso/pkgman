@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ratatui = "0.26"
+ratatui = "0.30.1"
 crossterm = { version = "0.27", features = ["event-stream"] }
 tokio = { version = "1.37", features = ["full"] }
-unicode-width = "0.1"
+unicode-width = "0.2.2"
 serde_json = "1.0"
+portable-pty = "0.9"
+vt100 = "0.16.2"
 
 [profile.release]
 opt-level = 3

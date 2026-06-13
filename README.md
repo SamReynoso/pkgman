@@ -9,7 +9,7 @@
 ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝
 ```
 
-**A high-performance, keyboard-driven TUI package manager for Arch Linux**  
+**A high-performance, keyboard-driven TUI package manager for Arch Linux**
 Built with Rust · Powered by Ratatui · AUR-aware
 
 [![Rust](https://img.shields.io/badge/built_with-Rust-ce422b?style=flat-square&logo=rust)](https://www.rust-lang.org/)
@@ -33,10 +33,9 @@ Built with Rust · Powered by Ratatui · AUR-aware
 | Requirement | Notes |
 |---|---|
 | Arch Linux (or Arch-based distro) | Manjaro, EndeavourOS, etc. work fine |
-| Rust toolchain (`cargo`, `rustc`) | Install via [rustup.rs](https://rustup.rs) |
-| `pacman` | Ships with Arch — you already have it |
+| Rust toolchain | Install via `pacman` : `rustup` |
 | `pacman-contrib` | Provides `pactree` (required for dependency tree visualizer) |
-| `yay` or `paru` *(optional)* | Required for AUR operations |
+| `yay` or `paru` or `grimaur` *(optional)* | Required for AUR operations |
 
 ### Build from source
 
@@ -91,27 +90,6 @@ aur = false
 
 ---
 
-## AUR cache warm-up
-
-`pkgman` loads 114,000+ AUR packages in under 10ms by reading your AUR helper's shell completion cache directly:
-
-| Helper | Cache path |
-|--------|-----------|
-| `yay` | `~/.cache/yay/completion.cache` |
-| `paru` | `~/.cache/paru/completion.cache` |
-
-If AUR packages aren't appearing, warm up the cache first:
-
-```bash
-# yay
-yay -Sl aur > /dev/null
-
-# paru
-paru -Sl aur > /dev/null
-```
-
----
-
 ## Keyboard reference
 
 > Press `?` inside pkgman at any time to open the interactive help overlay.
@@ -120,8 +98,8 @@ paru -Sl aur > /dev/null
 |-----|--------|
 | `↑` / `k` | Move cursor up |
 | `↓` / `j` | Move cursor down |
-| `PgUp` / `PgDn` | Scroll full page |
-| `J` / `K` | Scroll details pane |
+| `PgUp` / `PgDn` `(CTRL)` | Scroll full page |
+| `J` / `K` + `(CTRL)` | Scroll details pane |
 | `1` – `7` | Switch filter tabs |
 | `/` | Enter live search mode |
 | `Ctrl+X` | Clear search query |
@@ -136,6 +114,8 @@ paru -Sl aur > /dev/null
 | `?` | Toggle help overlay |
 | `q` | Quit |
 
+`CTRL + J/K or PgUp/PgDown` controls the middle pannel.
+
 ---
 
 ## Theming
@@ -149,17 +129,17 @@ A full theming system is planned that will allow full control over colors, pane 
 ## Roadmap
 
 - [x] **Theming Engine** — Multiple preconfigured themes with instant switching support.
-- [ ] **Built-in theme presets** — Catppuccin, Nord, Gruvbox, Tokyo Night
-- [ ] **Mouse support** — optional click-to-select
+- [x] **Built-in theme presets** — Catppuccin, Nord, Gruvbox, Tokyo Night
+- [x] **Dependency tree visualizer** — graphical dep tree in the details pane
+- [x] **Search wiki entry** — Searches current package for related wiki entries
 - [ ] **AUR comment viewer** — inline AUR comments and flag status
-- [ ] **Dependency tree visualizer** — graphical dep tree in the details pane
 - [ ] **AUR PKGBUILD diff viewer** — diff updates before installing
 
 ---
 
 <div align="center">
 
-Made with ♥ on Arch Linux  
+Made with ♥ on Arch Linux
 [⭐ Star this repo](https://github.com/pathakjiop/pkgman) · [🐛 Report a bug](https://github.com/pathakjiop/pkgman/issues/new?template=bug_report.md) · [💡 Request a feature](https://github.com/pathakjiop/pkgman/issues/new?template=feature_request.md)
 
 </div>

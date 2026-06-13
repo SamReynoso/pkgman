@@ -45,6 +45,12 @@ pub enum ConfirmAction {
 	Update,
 }
 
+/// Live console subprocess handles: keystrokes go to writer, resizes to master.
+pub struct ConsolePty {
+	pub writer: Box<dyn std::io::Write + Send>,
+	pub master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
 pub struct App {
 	pub pkgs: Vec<Package>,
 	pub view: Vec<usize>, // indices into pkgs
@@ -69,14 +75,10 @@ pub struct App {
 	pub spinner_tick: u64,
 	pub needs_filter: bool,
 	pub console_mode: bool,
-	pub console_lines: Vec<String>,
 	pub console_scroll: usize,
 	pub console_finished: Option<bool>, // Some(success)
-	pub sudo_password_mode: bool,
-	pub sudo_password: String,
-	pub pending_action: Option<(ConfirmAction, Vec<String>)>,
-	pub console_in_escape: bool,
-	pub current_line: String,
+	pub console_pty: Option<ConsolePty>,
+	pub console_term: Option<vt100::Parser>,
 	pub terminal_needs_clear: bool,
 	pub last_cursor_change: std::time::Instant,
 
@@ -147,14 +149,10 @@ impl App {
 			spinner_tick: 0,
 			needs_filter: false,
 			console_mode: false,
-			console_lines: Vec::new(),
 			console_scroll: 0,
 			console_finished: None,
-			sudo_password_mode: false,
-			sudo_password: String::new(),
-			pending_action: None,
-			console_in_escape: false,
-			current_line: String::new(),
+			console_pty: None,
+			console_term: None,
 			terminal_needs_clear: false,
 			last_cursor_change: std::time::Instant::now(),
 
@@ -287,29 +285,10 @@ impl App {
 		self.apply_sort(true);
 	}
 
-	pub fn write_console_chunk(&mut self, chunk: &str) {
-		for c in chunk.chars() {
-			if self.console_in_escape {
-				if c.is_ascii_alphabetic() {
-					self.console_in_escape = false;
-				}
-			} else if c == '\x1b' {
-				self.console_in_escape = true;
-			} else if c == '\n' {
-				self.console_lines.push(self.current_line.clone());
-				self.current_line.clear();
-			} else if c == '\r' {
-				self.current_line.clear();
-			} else {
-				self.current_line.push(c);
-			}
+	pub fn write_console_chunk(&mut self, bytes: &[u8]) {
+		if let Some(term) = self.console_term.as_mut() {
+			term.process(bytes);
 		}
-		// Limit log lines to last 1000
-		if self.console_lines.len() > 1000 {
-			self.console_lines.drain(0..self.console_lines.len() - 1000);
-		}
-		// Auto scroll to bottom
-		self.console_scroll = self.console_lines.len();
 	}
 
 	pub fn update_installed_cache(&mut self) {
@@ -356,12 +335,20 @@ pub fn get_disk_free() -> String {
 pub fn load_packages_sync() -> Vec<Package> {
 	let helper = crate::config::aur_helper();
 
-	let output = Command::new("pacman").arg("-Si").output().ok();
+	let output = Command::new("pacman")
+		.env("LC_ALL", "C")
+		.arg("-Si")
+		.output()
+		.ok();
 	let raw = output
 		.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 		.unwrap_or_default();
 
-	let q_out = Command::new("pacman").arg("-Qq").output().ok();
+	let q_out = Command::new("pacman")
+		.env("LC_ALL", "C")
+		.arg("-Qq")
+		.output()
+		.ok();
 	let installed: HashSet<String> = q_out
 		.map(|o| {
 			String::from_utf8_lossy(&o.stdout)
@@ -374,9 +361,13 @@ pub fn load_packages_sync() -> Vec<Package> {
 
 	// Fetch updates via AUR helper if available (includes both pacman and AUR updates)
 	let u_out = if let Some(h) = helper {
-		Command::new(h).arg("-Qu").output().ok()
+		Command::new(h).env("LC_ALL", "C").arg("-Qu").output().ok()
 	} else {
-		Command::new("pacman").arg("-Qu").output().ok()
+		Command::new("pacman")
+			.env("LC_ALL", "C")
+			.arg("-Qu")
+			.output()
+			.ok()
 	};
 	let updates: HashSet<String> = u_out
 		.map(|o| {
@@ -388,7 +379,11 @@ pub fn load_packages_sync() -> Vec<Package> {
 		.unwrap_or_default();
 
 	// Query installed foreign/AUR packages
-	let qm_out = Command::new("pacman").arg("-Qm").output().ok();
+	let qm_out = Command::new("pacman")
+		.env("LC_ALL", "C")
+		.arg("-Qm")
+		.output()
+		.ok();
 	let foreign: HashMap<String, String> = qm_out
 		.map(|o| {
 			String::from_utf8_lossy(&o.stdout)
@@ -506,49 +501,66 @@ pub fn load_aur_sync() -> Vec<Package> {
 
 	let mut pkgs = Vec::new();
 
-	// Try to load from completion.cache first for high performance (typically <10ms)
-	if let Some(home) = std::env::var_os("HOME") {
-		let paths = vec![
-			PathBuf::from(&home).join(".cache/paru/completion.cache"),
-			PathBuf::from(&home).join(".cache/yay/completion.cache"),
+	// Reuse the helpers' AUR name dumps for high performance (typically <10ms):
+	// paru caches bare names from packages.gz, yay keeps "name repo" pairs
+	let cache_base = std::env::var_os("XDG_CACHE_HOME")
+		.map(PathBuf::from)
+		.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
+
+	if let Some(base) = cache_base {
+		let paths = [
+			(base.join("paru/packages.aur"), false),
+			(base.join("yay/completion.cache"), true),
+			(base.join("grimaur/completion.cache"), false),
 		];
 
-		for path in paths {
-			if path.exists()
-				&& let Ok(file) = File::open(&path)
-			{
+		for (path, has_repo_column) in paths {
+			if let Ok(file) = File::open(&path) {
 				let reader = BufReader::new(file);
 				for l in reader.lines().map_while(Result::ok) {
-					let parts: Vec<&str> = l.split_whitespace().collect();
-					if parts.len() >= 2 && parts[1].to_uppercase() == "AUR" {
-						let name = parts[0].to_string();
-						let search_key = format!("{} aur package", name)
-							.to_lowercase();
-						pkgs.push(Package {
-							name,
-							version: "unknown".to_string(),
-							repo: "aur".to_string(),
-							desc: "AUR Package".to_string(),
-							arch: "any".to_string(),
-							url: "None".to_string(),
-							licenses: "None".to_string(),
-							groups: "None".to_string(),
-							provides: "None".to_string(),
-							depends: "None".to_string(),
-							optdeps: "None".to_string(),
-							req_by: "None".to_string(),
-							opt_for: "None".to_string(),
-							conflicts: "None".to_string(),
-							replaces: "None".to_string(),
-							dl_size: "None".to_string(),
-							inst_size: "None".to_string(),
-							packager: "AUR".to_string(),
-							build_date: "None".to_string(),
-							installed: false,
-							upgradable: false,
-							search_key,
-						});
-					}
+					let name = if has_repo_column {
+						let parts: Vec<&str> =
+							l.split_whitespace().collect();
+						if parts.len() >= 2
+							&& parts[1].to_uppercase() == "AUR"
+						{
+							parts[0].to_string()
+						} else {
+							continue;
+						}
+					} else {
+						let n = l.trim();
+						if n.is_empty() {
+							continue;
+						}
+						n.to_string()
+					};
+					let search_key =
+						format!("{} aur package", name).to_lowercase();
+					pkgs.push(Package {
+						name,
+						version: "unknown".to_string(),
+						repo: "aur".to_string(),
+						desc: "AUR Package".to_string(),
+						arch: "any".to_string(),
+						url: "None".to_string(),
+						licenses: "None".to_string(),
+						groups: "None".to_string(),
+						provides: "None".to_string(),
+						depends: "None".to_string(),
+						optdeps: "None".to_string(),
+						req_by: "None".to_string(),
+						opt_for: "None".to_string(),
+						conflicts: "None".to_string(),
+						replaces: "None".to_string(),
+						dl_size: "None".to_string(),
+						inst_size: "None".to_string(),
+						packager: "AUR".to_string(),
+						build_date: "None".to_string(),
+						installed: false,
+						upgradable: false,
+						search_key,
+					});
 				}
 				if !pkgs.is_empty() {
 					return pkgs; // Successfully loaded from cache!
@@ -557,7 +569,7 @@ pub fn load_aur_sync() -> Vec<Package> {
 		}
 	}
 
-	// Fallback if completion.cache does not exist
+	// Fallback if no helper cache file exists
 	let helper = if which("paru") {
 		Some("paru")
 	} else if which("yay") {
@@ -571,7 +583,11 @@ pub fn load_aur_sync() -> Vec<Package> {
 		None => return Vec::new(),
 	};
 
-	let output = Command::new(helper).args(["-Sl", "aur"]).output().ok();
+	let output = Command::new(helper)
+		.env("LC_ALL", "C")
+		.args(["-Sl", "aur"])
+		.output()
+		.ok();
 
 	let out = output
 		.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

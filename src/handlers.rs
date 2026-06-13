@@ -1,22 +1,141 @@
-use crate::app::{App, ConfirmAction, FILTERS};
+use crate::app::{App, ConfirmAction, ConsolePty, FILTERS};
 use crate::event::AppEvent;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::process::Command;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use std::io::{Read, Write};
 use tokio::sync::mpsc;
 
-pub fn is_sudo_cached() -> bool {
-	Command::new("sudo")
-		.args(["-n", "true"])
-		.stdout(std::process::Stdio::null())
-		.stderr(std::process::Stdio::null())
-		.status()
-		.map(|s| s.success())
-		.unwrap_or(false)
+/// Pty dims matching the console overlay (85% of screen minus borders).
+pub fn console_pty_size() -> PtySize {
+	let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+	PtySize {
+		rows: (rows as u32 * 85 / 100).saturating_sub(2).max(4) as u16,
+		cols: (cols as u32 * 85 / 100).saturating_sub(2).max(20) as u16,
+		pixel_width: 0,
+		pixel_height: 0,
+	}
+}
+
+/// Encode a key event as terminal input bytes for the console pty.
+fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
+	match key.code {
+		KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+			if c.is_ascii_alphabetic() {
+				vec![(c.to_ascii_uppercase() as u8) & 0x1f]
+			} else {
+				Vec::new()
+			}
+		}
+		KeyCode::Char(c) => c.to_string().into_bytes(),
+		KeyCode::Enter => vec![b'\r'],
+		KeyCode::Backspace => vec![0x7f],
+		KeyCode::Tab => vec![b'\t'],
+		KeyCode::Esc => vec![0x1b],
+		KeyCode::Up => b"\x1b[A".to_vec(),
+		KeyCode::Down => b"\x1b[B".to_vec(),
+		KeyCode::Right => b"\x1b[C".to_vec(),
+		KeyCode::Left => b"\x1b[D".to_vec(),
+		_ => Vec::new(),
+	}
+}
+
+/// Names pacman knows from sync repos; the rest are AUR-only.
+async fn pacman_known(names: &[&str]) -> std::collections::HashSet<String> {
+	let output = tokio::process::Command::new("pacman")
+		.env("LC_ALL", "C")
+		.arg("-Si")
+		.args(names)
+		.output()
+		.await;
+	let mut known = std::collections::HashSet::new();
+	if let Ok(out) = output {
+		for line in String::from_utf8_lossy(&out.stdout).lines() {
+			if let Some(rest) = line.strip_prefix("Name")
+				&& let Some(pos) = rest.find(':')
+			{
+				known.insert(rest[pos + 1..].trim().to_string());
+			}
+		}
+	}
+	known
+}
+
+/// Spawn command on a pty, stream output to the console pane, report success.
+/// The child owns the pty as its controlling terminal, so it can prompt
+/// (sudo password etc.); keystrokes are forwarded via the handles in PtyStarted.
+async fn stream_command(cmd: CommandBuilder, tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
+	let pair = match NativePtySystem::default().openpty(console_pty_size()) {
+		Ok(p) => p,
+		Err(e) => {
+			let _ = tx.send(AppEvent::Message(
+				format!("Failed to open pty: {}", e),
+				4,
+				false,
+			));
+			return false;
+		}
+	};
+
+	let mut child = match pair.slave.spawn_command(cmd) {
+		Ok(c) => c,
+		Err(e) => {
+			let _ = tx.send(AppEvent::Message(
+				format!("Failed to spawn command: {}", e),
+				4,
+				false,
+			));
+			return false;
+		}
+	};
+	drop(pair.slave);
+
+	let reader = pair.master.try_clone_reader();
+	let writer = pair.master.take_writer();
+	let (reader, writer) = match (reader, writer) {
+		(Ok(r), Ok(w)) => (r, w),
+		(r, w) => {
+			let e = r.err().or(w.err()).unwrap();
+			let _ = child.kill();
+			let _ = tx.send(AppEvent::Message(
+				format!("Failed to wire pty: {}", e),
+				4,
+				false,
+			));
+			return false;
+		}
+	};
+	let _ = tx.send(AppEvent::PtyStarted(ConsolePty {
+		writer,
+		master: pair.master,
+	}));
+
+	let tx_out = tx.clone();
+	tokio::task::spawn_blocking(move || {
+		let mut reader = reader;
+		let mut buf = [0u8; 1024];
+		loop {
+			match reader.read(&mut buf) {
+				Ok(0) | Err(_) => break,
+				Ok(n) => {
+					if tx_out
+						.send(AppEvent::ConsoleChunk(buf[..n].to_vec()))
+						.is_err()
+					{
+						break;
+					}
+				}
+			}
+		}
+	});
+
+	let status = tokio::task::spawn_blocking(move || child.wait()).await;
+	match status {
+		Ok(Ok(s)) => s.success(),
+		_ => false,
+	}
 }
 
 pub fn trigger_action_in_tui(
-	password: Option<String>,
 	tx: mpsc::UnboundedSender<AppEvent>,
 	action: ConfirmAction,
 	names: Vec<String>,
@@ -24,131 +143,73 @@ pub fn trigger_action_in_tui(
 	tokio::spawn(async move {
 		let _ = tx.send(AppEvent::Message("Initializing...".to_string(), 0, true));
 
-		if let Some(pwd) = password {
-			let mut child = match tokio::process::Command::new("sudo")
-				.args(["-S", "-v"])
-				.stdin(std::process::Stdio::piped())
-				.stdout(std::process::Stdio::null())
-				.stderr(std::process::Stdio::piped())
-				.spawn()
-			{
-				Ok(c) => c,
-				Err(e) => {
-					let _ = tx.send(AppEvent::Message(
-						format!("Sudo initialization failed: {}", e),
-						4,
-						false,
-					));
-					let _ = tx.send(AppEvent::ConsoleFinished(false));
-					return;
-				}
-			};
-
-			if let Some(mut stdin) = child.stdin.take() {
-				let _ = stdin.write_all(pwd.as_bytes()).await;
-				let _ = stdin.write_all(b"\n").await;
-			}
-
-			match child.wait().await {
-				Ok(s) if s.success() => {}
-				_ => {
-					let _ = tx.send(AppEvent::Message(
-						"Sudo authentication failed".to_string(),
-						4,
-						false,
-					));
-					let _ = tx.send(AppEvent::ConsoleFinished(false));
-					return;
-				}
-			}
-		}
-
 		let helper = crate::config::aur_helper().unwrap_or("pacman");
 
 		let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-		let mut cmd = match action {
+		let mut cmds: Vec<CommandBuilder> = Vec::new();
+		match action {
 			ConfirmAction::Install => {
-				if helper == "pacman" {
-					let mut c = tokio::process::Command::new("sudo");
+				if helper == "grimaur" {
+					// grimaur is AUR-only and takes one package per call:
+					// repo packages go to pacman, AUR ones one by one
+					let known = pacman_known(&name_refs).await;
+					let repo: Vec<&str> = name_refs
+						.iter()
+						.copied()
+						.filter(|n| known.contains(*n))
+						.collect();
+					if !repo.is_empty() {
+						let mut c = CommandBuilder::new("sudo");
+						c.args(["pacman", "--noconfirm", "-S"]);
+						c.args(&repo);
+						cmds.push(c);
+					}
+					for name in name_refs
+						.iter()
+						.copied()
+						.filter(|n| !known.contains(*n))
+					{
+						let mut c = CommandBuilder::new("grimaur");
+						c.args([
+							"--no-color",
+							"install",
+							"--noconfirm",
+							name,
+						]);
+						cmds.push(c);
+					}
+				} else if helper == "pacman" {
+					let mut c = CommandBuilder::new("sudo");
 					c.args(["pacman", "--noconfirm", "-S"]);
 					c.args(name_refs);
-					c
+					cmds.push(c);
 				} else {
-					let mut c = tokio::process::Command::new(helper);
+					let mut c = CommandBuilder::new(helper);
 					c.args(["--noconfirm", "-S"]);
 					c.args(name_refs);
-					c
+					cmds.push(c);
 				}
 			}
 			ConfirmAction::Remove => {
-				let mut c = tokio::process::Command::new("sudo");
+				let mut c = CommandBuilder::new("sudo");
 				c.args(["pacman", "--noconfirm", "-Rns"]);
 				c.args(name_refs);
-				c
+				cmds.push(c);
 			}
 			ConfirmAction::Update => {
-				if helper == "pacman" {
-					let mut c = tokio::process::Command::new("sudo");
-					c.args(["pacman", "--noconfirm", "-Syu"]);
-					c
-				} else {
-					let mut c = tokio::process::Command::new(helper);
-					c.args(["--noconfirm", "-Syu"]);
-					c
-				}
+				let mut c = CommandBuilder::new("sudo");
+				c.args(["pacman", "--noconfirm", "-Syu"]);
+				cmds.push(c);
 			}
-		};
-
-		cmd.stdin(std::process::Stdio::null())
-			.stdout(std::process::Stdio::piped())
-			.stderr(std::process::Stdio::piped());
-
-		let mut child = match cmd.spawn() {
-			Ok(c) => c,
-			Err(e) => {
-				let _ = tx.send(AppEvent::Message(
-					format!("Failed to spawn command: {}", e),
-					4,
-					false,
-				));
-				let _ = tx.send(AppEvent::ConsoleFinished(false));
-				return;
-			}
-		};
-
-		let stdout = child.stdout.take();
-		let stderr = child.stderr.take();
-
-		if let Some(mut out) = stdout {
-			let tx = tx.clone();
-			tokio::spawn(async move {
-				let mut buf = [0; 1024];
-				while let Ok(n) = out.read(&mut buf).await {
-					if n == 0 {
-						break;
-					}
-					let s = String::from_utf8_lossy(&buf[..n]).into_owned();
-					let _ = tx.send(AppEvent::ConsoleChunk(s));
-				}
-			});
 		}
 
-		if let Some(mut err) = stderr {
-			let tx = tx.clone();
-			tokio::spawn(async move {
-				let mut buf = [0; 1024];
-				while let Ok(n) = err.read(&mut buf).await {
-					if n == 0 {
-						break;
-					}
-					let s = String::from_utf8_lossy(&buf[..n]).into_owned();
-					let _ = tx.send(AppEvent::ConsoleChunk(s));
-				}
-			});
+		let mut success = true;
+		for cmd in cmds {
+			if !stream_command(cmd, &tx).await {
+				success = false;
+				break;
+			}
 		}
-
-		let status = child.wait().await;
-		let success = status.map(|s| s.success()).unwrap_or(false);
 
 		let _ = tx.send(AppEvent::ConsoleFinished(success));
 
@@ -188,37 +249,54 @@ pub fn trigger_action_in_tui(
 	});
 }
 
+/// Helper invocation printing pacman -Si style 'Key : Value' package info.
+fn aur_info_args<'a>(helper: &str, name: &'a str) -> Vec<&'a str> {
+	if helper == "grimaur" {
+		vec!["--no-color", "inspect", "--plain", "--full", name]
+	} else {
+		vec!["-Si", name]
+	}
+}
+
 pub fn trigger_aur_details_fetch(name: String, tx: mpsc::UnboundedSender<AppEvent>) {
 	tokio::spawn(async move {
-		let Some(helper) = crate::config::aur_helper() else {
-			return;
-		};
+		let mut sent = false;
+		if let Some(helper) = crate::config::aur_helper() {
+			let output = tokio::process::Command::new(helper)
+				.env("LC_ALL", "C")
+				.args(aur_info_args(helper, &name))
+				.output()
+				.await;
 
-		let output = tokio::process::Command::new(helper)
-			.args(["-Si", &name])
-			.output()
-			.await;
-
-		if let Ok(out) = output
-			&& out.status.success()
-		{
-			let stdout_str = String::from_utf8_lossy(&out.stdout);
-			let mut cur = std::collections::HashMap::new();
-			for line in stdout_str.lines() {
-				if let Some(pos) = line.find(" : ") {
-					let k = &line[..pos];
-					let v = &line[pos + 3..];
-					cur.insert(k.trim().to_string(), v.trim().to_string());
+			if let Ok(out) = output
+				&& out.status.success()
+			{
+				let stdout_str = String::from_utf8_lossy(&out.stdout);
+				let mut cur = std::collections::HashMap::new();
+				for line in stdout_str.lines() {
+					if let Some(pos) = line.find(" : ") {
+						let k = &line[..pos];
+						let v = &line[pos + 3..];
+						cur.insert(
+							k.trim().to_string(),
+							v.trim().to_string(),
+						);
+					}
+				}
+				if !cur.is_empty()
+					&& let Some(pkg) = crate::app::map_pkg(
+						&cur,
+						&std::collections::HashSet::new(),
+						&std::collections::HashSet::new(),
+					) {
+					let _ = tx.send(AppEvent::AurDetailsLoaded(Box::new(pkg)));
+					sent = true;
 				}
 			}
-			if !cur.is_empty()
-				&& let Some(pkg) = crate::app::map_pkg(
-					&cur,
-					&std::collections::HashSet::new(),
-					&std::collections::HashSet::new(),
-				) {
-				let _ = tx.send(AppEvent::AurDetailsLoaded(Box::new(pkg)));
-			}
+		}
+		// Failure must report back, else the row is stuck on "Fetching details..."
+		if !sent {
+			let _ = tx.send(AppEvent::AurDetailsFailed(name));
 		}
 	});
 }
@@ -276,9 +354,59 @@ pub fn trigger_open_homepage(url: String, tx: mpsc::UnboundedSender<AppEvent>) {
 	});
 }
 
+/// Flat one-level dep list from AUR helper metadata, for packages pactree
+/// can't resolve (AUR packages absent from the sync databases).
+async fn aur_dep_fallback(name: &str) -> Option<Vec<String>> {
+	let helper = crate::config::aur_helper()?;
+	let out = tokio::process::Command::new(helper)
+		.env("LC_ALL", "C")
+		.args(aur_info_args(helper, name))
+		.output()
+		.await
+		.ok()?;
+	if !out.status.success() {
+		return None;
+	}
+
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	let mut deps: Vec<(String, &'static str)> = Vec::new();
+	for line in stdout.lines() {
+		let Some(pos) = line.find(" : ") else {
+			continue;
+		};
+		let tag = match line[..pos].trim() {
+			"Depends On" => "",
+			"Make Deps" | "Make Depends" => " (make)",
+			"Check Deps" | "Check Depends" => " (check)",
+			"Optional Deps" => " (optional)",
+			_ => continue,
+		};
+		let val = line[pos + 3..].trim();
+		if val == "None" || val.is_empty() {
+			continue;
+		}
+		for d in val.split("  ").map(str::trim).filter(|d| !d.is_empty()) {
+			deps.push((d.to_string(), tag));
+		}
+	}
+
+	let mut lines = vec![format!("{} (AUR metadata, direct deps only)", name)];
+	if deps.is_empty() {
+		lines.push("└─ (no dependencies)".to_string());
+	} else {
+		let last = deps.len() - 1;
+		for (i, (d, tag)) in deps.into_iter().enumerate() {
+			let branch = if i == last { "└─" } else { "├─" };
+			lines.push(format!("{} {}{}", branch, d, tag));
+		}
+	}
+	Some(lines)
+}
+
 pub fn trigger_dep_tree_fetch(name: String, installed: bool, tx: mpsc::UnboundedSender<AppEvent>) {
 	tokio::spawn(async move {
 		let mut cmd = tokio::process::Command::new("pactree");
+		cmd.env("LC_ALL", "C");
 		cmd.arg("-a");
 		if !installed {
 			cmd.arg("-s");
@@ -294,9 +422,16 @@ pub fn trigger_dep_tree_fetch(name: String, installed: bool, tx: mpsc::Unbounded
 				let _ = tx.send(AppEvent::DepTreeLoaded(name, Ok(tree)));
 			}
 			Ok(out) => {
-				let err_msg =
-					String::from_utf8_lossy(&out.stderr).trim().to_string();
-				let _ = tx.send(AppEvent::DepTreeLoaded(name, Err(err_msg)));
+				// Not in the sync DBs: likely AUR, try helper metadata
+				if let Some(tree) = aur_dep_fallback(&name).await {
+					let _ = tx.send(AppEvent::DepTreeLoaded(name, Ok(tree)));
+				} else {
+					let err_msg = String::from_utf8_lossy(&out.stderr)
+						.trim()
+						.to_string();
+					let _ = tx
+						.send(AppEvent::DepTreeLoaded(name, Err(err_msg)));
+				}
 			}
 			Err(e) => {
 				let _ = tx.send(AppEvent::DepTreeLoaded(name, Err(e.to_string())));
@@ -316,7 +451,7 @@ pub fn trigger_aur_search(query: String, tx: mpsc::UnboundedSender<AppEvent>) {
 			Some(h) => h,
 			None => {
 				let msg = if crate::config::cfg().aur {
-					"No AUR helper (yay/paru) found."
+					"No AUR helper (yay/paru/grimaur) found."
 				} else {
 					"AUR features disabled in config."
 				};
@@ -326,8 +461,15 @@ pub fn trigger_aur_search(query: String, tx: mpsc::UnboundedSender<AppEvent>) {
 			}
 		};
 
+		// grimaur --plain prints pacman -Ss style results, best match first
+		let args: Vec<&str> = if helper == "grimaur" {
+			vec!["--no-color", "search", "--plain", &query]
+		} else {
+			vec!["-Ss", "--aur", &query]
+		};
 		let output = tokio::process::Command::new(helper)
-			.args(["-Ss", "--aur", &query])
+			.env("LC_ALL", "C")
+			.args(&args)
 			.output()
 			.await;
 
@@ -458,6 +600,7 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 				app.theme_builder_open = false;
 				let _ = crate::config::save_config(
 					crate::config::cfg().aur,
+					&crate::config::cfg().helper,
 					&app.theme,
 				);
 			}
@@ -539,64 +682,37 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 		return false;
 	}
 
-	if app.sudo_password_mode {
-		match key.code {
-			KeyCode::Enter => {
-				app.sudo_password_mode = false;
-				app.console_mode = true;
-				app.console_lines.clear();
-				app.current_line.clear();
-				app.console_scroll = 0;
-				app.console_finished = None;
-				app.is_loading = true;
-				let pwd = Some(app.sudo_password.clone());
-				app.sudo_password.clear();
-				if let Some((action, names)) = app.pending_action.take() {
-					trigger_action_in_tui(pwd, tx.clone(), action, names);
-				}
-			}
-			KeyCode::Esc => {
-				app.sudo_password_mode = false;
-				app.sudo_password.clear();
-				app.pending_action = None;
-			}
-			KeyCode::Backspace => {
-				if key.modifiers.contains(KeyModifiers::CONTROL) {
-					delete_last_word(&mut app.sudo_password);
-				} else {
-					app.sudo_password.pop();
-				}
-			}
-			KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-				delete_last_word(&mut app.sudo_password);
-			}
-			KeyCode::Char(c) => {
-				app.sudo_password.push(c);
-			}
-			_ => {}
-		}
-		return false;
-	}
-
 	if app.console_mode {
+		// Running: forward keystrokes to the subprocess pty so it can
+		// prompt interactively (sudo password, pacman questions, Ctrl+C)
+		if app.console_finished.is_none() {
+			if let Some(pty) = app.console_pty.as_mut() {
+				let bytes = key_to_bytes(&key);
+				if !bytes.is_empty() {
+					let _ = pty.writer.write_all(&bytes);
+					let _ = pty.writer.flush();
+				}
+			}
+			return false;
+		}
+		// console_scroll is vt100 scrollback: 0 = bottom, larger = older
 		match key.code {
-			KeyCode::Esc | KeyCode::Enter if app.console_finished.is_some() => {
+			KeyCode::Esc | KeyCode::Enter => {
 				app.console_mode = false;
 				app.console_finished = None;
-				app.console_lines.clear();
-				app.current_line.clear();
+				app.console_term = None;
 			}
 			KeyCode::Up | KeyCode::Char('k') => {
-				app.console_scroll = app.console_scroll.saturating_sub(1);
-			}
-			KeyCode::Down | KeyCode::Char('j') => {
 				app.console_scroll = app.console_scroll.saturating_add(1);
 			}
+			KeyCode::Down | KeyCode::Char('j') => {
+				app.console_scroll = app.console_scroll.saturating_sub(1);
+			}
 			KeyCode::PageUp => {
-				app.console_scroll = app.console_scroll.saturating_sub(20);
+				app.console_scroll = app.console_scroll.saturating_add(20);
 			}
 			KeyCode::PageDown => {
-				app.console_scroll = app.console_scroll.saturating_add(20);
+				app.console_scroll = app.console_scroll.saturating_sub(20);
 			}
 			_ => {}
 		}
@@ -606,19 +722,12 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 	if let Some((action, names)) = app.confirm.take() {
 		match key.code {
 			KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-				if is_sudo_cached() {
-					app.console_mode = true;
-					app.console_lines.clear();
-					app.current_line.clear();
-					app.console_scroll = 0;
-					app.console_finished = None;
-					app.is_loading = true;
-					trigger_action_in_tui(None, tx.clone(), action, names);
-				} else {
-					app.sudo_password_mode = true;
-					app.sudo_password.clear();
-					app.pending_action = Some((action, names));
-				}
+				app.console_mode = true;
+				app.console_term = None;
+				app.console_scroll = 0;
+				app.console_finished = None;
+				app.is_loading = true;
+				trigger_action_in_tui(tx.clone(), action, names);
 			}
 			KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
 				// Action canceled
@@ -698,6 +807,12 @@ pub fn handle_key(key: KeyEvent, app: &mut App, tx: &mpsc::UnboundedSender<AppEv
 		}
 		KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
 			app.detail_top = app.detail_top.saturating_add(1);
+		}
+		KeyCode::PageUp if key.modifiers.contains(KeyModifiers::CONTROL) => {
+			app.detail_top = app.detail_top.saturating_sub(20);
+		}
+		KeyCode::PageDown if key.modifiers.contains(KeyModifiers::CONTROL) => {
+			app.detail_top = app.detail_top.saturating_add(20);
 		}
 
 		KeyCode::Up | KeyCode::Char('k') if app.cursor > 0 => {
@@ -1085,15 +1200,11 @@ fn clean_wikitext(text: &str) -> String {
 				&& let Some(offset) = chars[i + 1..].iter().position(|&c| c == ']')
 			{
 				let close_idx = i + 1 + offset;
-				let inner =
-					chars[i + 1..close_idx].iter().collect::<String>();
+				let inner = chars[i + 1..close_idx].iter().collect::<String>();
 				if let Some(space_idx) = inner.find(' ') {
 					let url = &inner[..space_idx];
 					let display = &inner[space_idx + 1..];
-					cleaned_line.push_str(&format!(
-						"{} ({})",
-						display, url
-					));
+					cleaned_line.push_str(&format!("{} ({})", display, url));
 				} else {
 					cleaned_line.push_str(&inner);
 				}

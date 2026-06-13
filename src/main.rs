@@ -41,13 +41,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	// Channel for application event passing
 	let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
-	// Spawn input key event listener task using blocking reader
+	// Spawn input key event listener task using blocking reader.
+	// Poll with timeout so the thread exits once the channel closes,
+	// otherwise runtime shutdown blocks on read() until one more key
 	let tx_key = tx.clone();
 	tokio::task::spawn_blocking(move || {
-		while let Ok(ev) = ct_event::read() {
+		loop {
+			if tx_key.is_closed() {
+				break;
+			}
+			match ct_event::poll(Duration::from_millis(100)) {
+				Ok(false) => continue,
+				Err(_) => break,
+				Ok(true) => {}
+			}
+			let Ok(ev) = ct_event::read() else { break };
 			match ev {
-				CrosstermEvent::Key(key) if tx_key.send(AppEvent::Key(key)).is_err() => break,
-				CrosstermEvent::Resize(_, _) if tx_key.send(AppEvent::Resize).is_err() => break,
+				CrosstermEvent::Key(key)
+					if tx_key.send(AppEvent::Key(key)).is_err() =>
+				{
+					break;
+				}
+				CrosstermEvent::Resize(_, _)
+					if tx_key.send(AppEvent::Resize).is_err() =>
+				{
+					break;
+				}
 				_ => {}
 			}
 		}
@@ -102,18 +121,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
 						app.check_msg_expiry();
 
 						// Check if we need to fetch details for selected AUR package
-						if !app.view.is_empty() && app.cursor < app.view.len() {
+						if !app.view.is_empty()
+							&& app.cursor < app.view.len()
+						{
 							let idx = app.view[app.cursor];
 							if idx < app.pkgs.len()
-								&& config::cfg().aur && app.pkgs[idx].repo
-								== "aur" && app.pkgs[idx].desc == "AUR Package"
-								&& app.last_cursor_change.elapsed()
-									> Duration::from_millis(300)
+								&& config::cfg().aur && app.pkgs[idx]
+								.repo == "aur" && app.pkgs[idx].desc
+								== "AUR Package" && app
+								.last_cursor_change
+								.elapsed()
+								> Duration::from_millis(300)
 							{
-								let name = app.pkgs[idx].name.clone();
+								let name =
+									app.pkgs[idx].name.clone();
 								// Mark as fetching so we don't spawn multiple tasks
 								app.pkgs[idx].desc =
-									"Fetching details...".to_string();
+									"Fetching details..."
+										.to_string();
 								handlers::trigger_aur_details_fetch(
 									name,
 									tx.clone(),
@@ -123,18 +148,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 						// Check if we need to fetch the dependency tree
 						if app.show_dep_tree
-							&& !app.view.is_empty() && app.cursor < app.view.len()
+							&& !app.view.is_empty() && app.cursor
+							< app.view.len()
 						{
 							let idx = app.view[app.cursor];
 							if idx < app.pkgs.len() {
 								let name = &app.pkgs[idx].name;
 								if app.dep_tree_pkg_name.as_ref()
-									!= Some(name) && !app.dep_tree_loading
-									&& app.last_cursor_change.elapsed()
-										> Duration::from_millis(250)
+									!= Some(name) && !app
+									.dep_tree_loading && app
+									.last_cursor_change
+									.elapsed()
+									> Duration::from_millis(250)
 								{
 									app.dep_tree_loading = true;
-									app.dep_tree_content.clear();
+									app.dep_tree_content
+										.clear();
 									handlers::trigger_dep_tree_fetch(
 										name.clone(),
 										app.pkgs[idx].installed,
@@ -156,7 +185,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 					}
 					AppEvent::AurLoaded(aur) => {
 						let known: std::collections::HashSet<String> =
-							app.pkgs.iter().map(|p| p.name.clone()).collect();
+							app.pkgs.iter()
+								.map(|p| p.name.clone())
+								.collect();
 						for a in aur {
 							if !known.contains(&a.name) {
 								app.pkgs.push(a);
@@ -183,17 +214,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
 					}
 					AppEvent::ConsoleFinished(success) => {
 						app.console_finished = Some(success);
+						app.console_pty = None;
 						app.is_loading = false;
 						if success {
 							trigger_db_reload(tx.clone());
 						}
 					}
+					AppEvent::PtyStarted(pty) => {
+						let size = handlers::console_pty_size();
+						app.console_term = Some(vt100::Parser::new(
+							size.rows, size.cols, 2000,
+						));
+						app.console_pty = Some(pty);
+					}
 					AppEvent::Resize => {
 						let _ = terminal.clear();
+						let size = handlers::console_pty_size();
+						if let Some(pty) = &app.console_pty {
+							let _ = pty.master.resize(size);
+						}
+						if let Some(term) = app.console_term.as_mut() {
+							term.screen_mut()
+								.set_size(size.rows, size.cols);
+						}
 					}
 					AppEvent::AurDetailsLoaded(fetched) => {
-						if let Some(idx) =
-							app.pkgs.iter().position(|p| p.name == fetched.name)
+						if let Some(idx) = app
+							.pkgs
+							.iter()
+							.position(|p| p.name == fetched.name)
 						{
 							let installed = app.pkgs[idx].installed;
 							let upgradable = app.pkgs[idx].upgradable;
@@ -204,12 +253,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
 						}
 						app.update_installed_cache();
 					}
+					AppEvent::AurDetailsFailed(name) => {
+						if let Some(pkg) =
+							app.pkgs.iter_mut().find(|p| p.name == name)
+							&& pkg.desc == "Fetching details..."
+						{
+							// Distinct from "AUR Package" so the Tick
+							// handler doesn't refetch in a loop
+							pkg.desc =
+								"AUR package (details unavailable)"
+									.to_string();
+						}
+					}
 					AppEvent::DepTreeLoaded(pkg_name, res) => {
-						if !app.view.is_empty() && app.cursor < app.view.len() {
-							let current_pkg_name =
-								&app.pkgs[app.view[app.cursor]].name;
+						// Always clear: result may be for a stale selection,
+						// leaving the flag set blocks any future fetch
+						app.dep_tree_loading = false;
+						if !app.view.is_empty()
+							&& app.cursor < app.view.len()
+						{
+							let current_pkg_name = &app.pkgs
+								[app.view[app.cursor]]
+								.name;
 							if current_pkg_name == &pkg_name {
-								app.dep_tree_loading = false;
 								match res {
 									Ok(tree) => {
 										app.dep_tree_content = tree;
@@ -238,8 +304,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 									app.wiki_err_msg = None;
 								}
 								Err(err) => {
-									app.wiki_content = Vec::new();
-									app.wiki_err_msg = Some(err);
+									app.wiki_content =
+										Vec::new();
+									app.wiki_err_msg =
+										Some(err);
 								}
 							}
 						}
